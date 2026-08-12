@@ -1,0 +1,3 @@
+id,split,grammar,validity_ok,structure_ok,spatial_ok,notes
+ex001,id,workflow,,,,"human audit template"
+ex002,ood,geometry,,,,

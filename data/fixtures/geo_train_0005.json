@@ -1,0 +1,140 @@
+{
+  "grammar": "geometry",
+  "entities": [
+    {
+      "id": "pA",
+      "type": "point",
+      "label": "A",
+      "bbox": [
+        104,
+        356,
+        8,
+        8
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "pB",
+      "type": "point",
+      "label": "B",
+      "bbox": [
+        382,
+        356,
+        8,
+        8
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "pC",
+      "type": "point",
+      "label": "C",
+      "bbox": [
+        236,
+        149,
+        8,
+        8
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "sAB",
+      "type": "segment",
+      "label": "AB",
+      "bbox": [
+        108,
+        360,
+        278,
+        0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "sBC",
+      "type": "segment",
+      "label": "BC",
+      "bbox": [
+        240,
+        153,
+        146,
+        207
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "sCA",
+      "type": "segment",
+      "label": "CA",
+      "bbox": [
+        108,
+        153,
+        132,
+        207
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "circ0",
+      "type": "circle",
+      "label": "\u03c9",
+      "bbox": [
+        204,
+        117,
+        72,
+        72
+      ],
+      "attrs": {}
+    }
+  ],
+  "relations": [
+    {
+      "src": "pA",
+      "dst": "sAB",
+      "type": "incident",
+      "label": ""
+    },
+    {
+      "src": "pB",
+      "dst": "sAB",
+      "type": "incident",
+      "label": ""
+    },
+    {
+      "src": "pB",
+      "dst": "sBC",
+      "type": "incident",
+      "label": ""
+    },
+    {
+      "src": "pC",
+      "dst": "sBC",
+      "type": "incident",
+      "label": ""
+    },
+    {
+      "src": "pC",
+      "dst": "sCA",
+      "type": "incident",
+      "label": ""
+    },
+    {
+      "src": "pA",
+      "dst": "sCA",
+      "type": "incident",
+      "label": ""
+    },
+    {
+      "src": "circ0",
+      "dst": "pC",
+      "type": "contains",
+      "label": ""
+    }
+  ],
+  "meta": {
+    "split": "train",
+    "idx": 5,
+    "relations": [
+      "contains_circle"
+    ]
+  }
+}

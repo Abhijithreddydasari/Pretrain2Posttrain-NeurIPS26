@@ -1,3 +1,8 @@
 # Paper
 
-Draft short paper + figures for Pre→Post / New In ML. Skeleton after statement is confirmed.
+- `draft.md` — short-paper skeleton  
+- `figures/` — checkpoint curves, failure grids (generated later)
+
+```bash
+python -m eval.checkpoint_curves --curves outputs/metrics/curves_example.json --out outputs/metrics/emergence_example.json
+```

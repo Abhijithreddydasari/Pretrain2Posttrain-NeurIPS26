@@ -1,0 +1,114 @@
+{
+  "grammar": "workflow",
+  "entities": [
+    {
+      "id": "n0",
+      "type": "node",
+      "label": "Transform",
+      "bbox": [
+        30.0,
+        120.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n1",
+      "type": "node",
+      "label": "Store",
+      "bbox": [
+        30.0,
+        320.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n2",
+      "type": "node",
+      "label": "Notify",
+      "bbox": [
+        190.0,
+        220.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n3",
+      "type": "decision",
+      "label": "Branch",
+      "bbox": [
+        310.0,
+        220.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n4",
+      "type": "node",
+      "label": "Ingest",
+      "bbox": [
+        360.0,
+        220.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n5",
+      "type": "node",
+      "label": "End",
+      "bbox": [
+        410.0,
+        220.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    }
+  ],
+  "relations": [
+    {
+      "src": "n0",
+      "dst": "n2",
+      "type": "edge",
+      "label": ""
+    },
+    {
+      "src": "n1",
+      "dst": "n2",
+      "type": "edge",
+      "label": ""
+    },
+    {
+      "src": "n2",
+      "dst": "n3",
+      "type": "edge",
+      "label": ""
+    },
+    {
+      "src": "n3",
+      "dst": "n4",
+      "type": "edge",
+      "label": ""
+    },
+    {
+      "src": "n4",
+      "dst": "n5",
+      "type": "edge",
+      "label": ""
+    }
+  ],
+  "meta": {
+    "pattern": "single_merge",
+    "split": "train",
+    "idx": 4
+  }
+}

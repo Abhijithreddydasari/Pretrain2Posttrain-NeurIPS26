@@ -1,0 +1,38 @@
+# Core
+numpy>=1.26
+pillow>=10.0
+lxml>=5.0
+pyyaml>=6.0
+tqdm>=4.66
+jsonlines>=4.0
+regex>=2024.0
+scipy>=1.11
+
+# Data / HF
+datasets>=2.19
+huggingface_hub>=0.24
+requests>=2.31
+
+# Eval / render
+cairosvg>=2.7
+# fallback raster path uses svglib+reportlab if cairosvg unavailable on Windows
+svglib>=1.5
+reportlab>=4.0
+
+# Train (heavy; install when ready)
+torch>=2.2
+transformers>=4.52
+accelerate>=0.33
+peft>=0.12
+bitsandbytes>=0.43; platform_system != "Darwin"
+trl>=0.9
+
+# Modal
+modal>=0.64
+
+# Metrics helpers
+scikit-learn>=1.4
+matplotlib>=3.8
+
+# Dev
+pytest>=8.0

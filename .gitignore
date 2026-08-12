@@ -1,1 +1,52 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+*.pem
+
+# Data & artifacts (keep fixtures)
+data/raw/
+data/processed/
+!data/fixtures/
+!data/fixtures/**
+*.png
+*.jpg
+*.jpeg
+*.svg
+!data/fixtures/**/*.svg
+!eval/fixtures/**/*.svg
+!paper/figures/.gitkeep
+
+# Models / train outputs
+checkpoints/
+adapters/
+outputs/
+wandb/
+runs/
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+
+# Modal / HF caches
+.hf_cache/
+.modal/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Large chat exports
 neurips_workshop_paper_conversation.md
+cursor_neurips_workshop_paper_submission.md

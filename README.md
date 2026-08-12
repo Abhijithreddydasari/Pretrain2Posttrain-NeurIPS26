@@ -1,61 +1,75 @@
-# Pretrain2Posttrain — Structured Educational Drawing under SFT
+# Pretrain2Posttrain — Structured SVG under SFT
 
 Standalone NeurIPS 2026 workshop research package.
 
-**Claim:** Post-training mainly teaches educational drawing **syntax / format**; **compositional spatial structure** is the bottleneck unless data+eval are designed for it.
+**Claim:** Post-training mainly teaches diagram **SVG syntax / format**; **compositional structure** is the bottleneck unless data+eval are designed for it.
 
-This is **not** a whiteboard product repo. Product Y (screenshot → multimodal model → drawing primitives) inspired the task; this repo must stand alone.
+**Task:** diagram image → **canonical native SVG** reconstruction (not a whiteboard product).
 
 ## Venues
 
-1. **Primary:** [Transitioning from Pre-Training to Post-Training](https://pretrain2posttrain.github.io/call.html) (NeurIPS 2026) — short paper ≈4–5 pages; deadline **Aug 29, 2026 AoE**
-2. **Optional:** [New In ML @ NeurIPS 2026](https://newinml.github.io/NewInML2026NeurIPS/) — 2–8 pages; non-archival; concurrent OK
+1. **Primary:** [Pre-Training to Post-Training](https://pretrain2posttrain.github.io/call.html) — short paper ≈4–5 pages; **Aug 29, 2026 AoE**
+2. **Optional:** [New In ML @ NeurIPS 2026](https://newinml.github.io/NewInML2026NeurIPS/)
 
-## Goals
+## Locked experiment
 
-- Empirical study: base VLM → LoRA SFT → checkpoint eval
-- Separate **validity/format** from **structural/compositional** competence
-- In-domain vs OOD composition holdout
-- Open, reproducible small study (not SOTA chasing)
+| Piece | Choice |
+|-------|--------|
+| Model | `google/gemma-4-E4B` base (local smoke: E2B QLoRA @ 8GB) |
+| Conditions | Base · 2k broad diagrams · 2k StructSVG (workflows + geometry) |
+| Eval | Validity, entity/relation F1, spatial aggregate, ID/OOD, dense checkpoints |
+| External | FlowGen topology; SVG-Diagrams DINO (secondary) |
 
 ## Non-goals (v0)
 
-- Whiteboard / tutor UI
-- RL / DPO / GRPO
-- Huge web SVG scrapes
-- Multi-model bakeoffs
-- Animation or handwriting style transfer
-- Depending on product Y runtime
+Whiteboard UI, RL, full SVG-Stack training, multi-model bakeoffs, sequential tutor actions.
 
-## Repo layout
+## Layout
 
 ```text
-notes/          research statement, experiment card, decisions log
-data/           raw / processed / splits (empty until schema locked)
-train/          LoRA SFT scripts (later)
-eval/           metrics, rubrics, checkpoint curve tooling (later)
-paper/          draft + figures
+notes/     statement, experiment card, canonical SVG, primer, research note
+configs/   model / train / eval YAML
+data/      schemas, scripts (broad filter + StructSVG generators)
+train/     LoRA SFT + Modal entrypoints
+eval/      validity, structure, metrics, runners
+paper/     draft + figures
 ```
 
-Start with:
+## Setup
 
-- [`notes/research_statement.md`](notes/research_statement.md)
-- [`notes/experiment_card.md`](notes/experiment_card.md)
-- [`notes/decisions.md`](notes/decisions.md)
-
-## How to run (later)
-
-Training and eval commands will land here after output schema + eval harness are locked. Expected shape:
-
-```text
-# 1) build/filter dataset
-# 2) zero-shot baseline on base VLM
-# 3) LoRA SFT with checkpoint dumps
-# 4) eval validity + structure on ID and OOD
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-Until then: **do not** treat missing `train/` scripts as incomplete science — the mailable artifact is the locked claim + protocol.
+**You must:** accept Gemma 4 E4B **base** license on Hugging Face; set `HF_TOKEN`; create Modal secret `huggingface-secret`.
+
+## How to run
+
+```bash
+# 1) Gold-recovery / unit checks
+python -m eval.gold_recovery
+
+# 2) Generate StructSVG pilot
+python -m data.scripts.generate_structsvg --pilot
+
+# 3) Filter broad candidates (streams HF; no full manual browse)
+python -m data.scripts.filter_broad_svg --pilot
+
+# 4) Local overfit smoke (8GB → E2B QLoRA)
+python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml
+
+# 5) Modal E4B (after smoke OK)
+modal run train/modal_app.py::smoke_e4b
+```
+
+See `notes/research_statement.md`, `notes/experiment_card.md`, `notes/primer.md`.
 
 ## Status
 
-Scaffold + research note ready for faculty email. Full training deferred pending schema/taxonomy/HF/GPU confirmation.
+Scientific contract **locked**. Eval harness + StructSVG generators + train/Modal stubs are in-repo.
+
+**Gates passed locally:** gold recovery, unit tests, train dry-run, StructSVG pilot manifests.
+
+**You still need:** HF Gemma 4 base access, Modal secret, then overfit → matched E4B runs (see `notes/setup_checklist.md`).

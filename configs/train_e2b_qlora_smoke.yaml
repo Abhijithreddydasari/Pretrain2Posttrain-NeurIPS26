@@ -1,0 +1,36 @@
+model_id: google/gemma-4-E2B
+revision: main
+trust_remote_code: true
+torch_dtype: bfloat16
+load_in_4bit: true
+attn_implementation: sdpa
+use_base_not_it: true
+prompt_template: |
+  Reconstruct the diagram as a single canonical SVG.
+  Use viewBox="0 0 512 512". Output only SVG markup.
+svg_prefix_scaffold: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">"
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: all-linear
+  bias: none
+  task_type: CAUSAL_LM
+train:
+  output_dir: outputs/e2b_qlora_smoke
+  num_train_epochs: 30
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 2.0e-4
+  logging_steps: 1
+  save_strategy: steps
+  save_steps: 20
+  max_seq_length: 3072
+  optim: paged_adamw_8bit
+  bf16: true
+  remove_unused_columns: false
+  report_to: none
+data:
+  manifest: data/fixtures/smoke_manifest.jsonl
+  max_samples: 32
+checkpoints_pct: [0, 5, 10, 20, 40, 60, 80, 100]

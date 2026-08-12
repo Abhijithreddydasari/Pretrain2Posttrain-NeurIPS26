@@ -1,73 +1,83 @@
-# Experiment Card (v0)
+# Experiment Card (v0 — locked)
 
-Status: **design locked in principle; schema/taxonomy/compute still open** (see questions at end of session notes).  
-Do **not** start full training or giant dataset generation until this card + eval schema are confirmed.
+Status: **task, metrics, conditions, and grammars locked**. Implement eval before full training.
 
 ---
 
 ## 1. Claim under test
 
-Post-training (LoRA SFT) mainly buys **drawing syntax / format**; **compositional spatial structure** lags unless data+eval explicitly pressure it.
+LoRA SFT mainly buys **SVG syntax/format**; **compositional structure** lags unless data+eval pressure it. Structure-designed data should change checkpoint timing and OOD topology relative to matched broad-diagram SFT.
 
 ---
 
-## 2. Protocol (minimal intervention)
+## 2. Protocol
 
 | Axis | Choice |
 |------|--------|
-| Task | Educational diagram **image → structured drawing** |
-| Model | Prefer `google/gemma-4-E2B` or `E4B` **base**; fallback InternVL3-*-Pretrained; last resort instruct (honest framing) |
-| Train | **LoRA / adapter SFT only** (no full unfreeze in v0) |
-| Stages | Single stage: SFT. No DPO/GRPO/RL in v0 |
-| Data size | N ≈ **500–2000** quality pairs (filter: must parse + render) |
-| Output | **ONE** format locked before train: native SVG **or** compact primitive protocol (prefer SVG if feasible) |
-| Holdout | **OOD compositional** split: unseen combinations of seen primitives/structures |
+| Task | Diagram **image → canonical native SVG** |
+| Model | `google/gemma-4-E4B` base; smoke: `E2B` QLoRA @ 8GB local |
+| Train | LoRA / QLoRA SFT; assistant/target-SVG tokens only in loss |
+| Stages | Single stage SFT (no DPO/GRPO/RL) |
+| Conditions | Base · Broad 2k · StructSVG 2k (matched supervised token budget) |
+| Output | Canonical SVG (`notes/canonical_svg.md`) |
+| Holdout | StructSVG compositional OOD |
 
-### Baselines / conditions
+### Inference protocols (document both)
 
-1. Base zero-shot (and optional few-shot) on same prompts  
-2. Mid-SFT checkpoints (e.g. 25% / 50% / 75% / 100% of steps)  
-3. Final LoRA SFT  
-4. In-domain vs OOD composition (same metrics both)
+1. **Fixed reconstruction prompt** — image + short instruction to emit SVG  
+2. **SVG-prefix scaffold** — same prompt, generation starts with `<svg` (helps raw base models)
 
----
+### Checkpoint schedule
 
-## 3. Data plan (v0)
-
-**Domain only:** educational diagrams — trees, linked lists, free-body / force diagrams, simple graphs / DAGs, (optional) bar/flow sketches for teaching. **Not** logos, art, icons, handwriting.
-
-**Pair construction (conceptual):**
-
-1. Generate or author a **structured ground-truth** drawing (SVG or primitives) with known topology  
-2. Render to PNG (and/or lightly corrupt / screenshot-like) as the **input image**  
-3. Train: `(image, optional short text instruction) → target markup/protocol`  
-4. Filter: parse fail / render fail → drop  
-
-**Splits:**
-
-| Split | Purpose |
-|-------|---------|
-| Train | Seen diagram families + seen primitive combos |
-| ID val/test | Same families, held-out instances |
-| OOD composition | Unseen **combinations** of seen parts (Chu-style memorization probe) |
-
-Exact category list and OOD construction rules: **still open** (block building until locked).
+```text
+0%, 5%, 10%, 20%, 40%, 60%, 80%, 100%
+```
 
 ---
 
-## 4. Metrics (define before serious training)
+## 3. Data
 
-| # | Metric | What it tests |
-|---|--------|----------------|
-| 1 | **Parse / render validity** | Well-formed markup; renders without crash |
-| 2 | **Structural / topology match** | Nodes, edges, hierarchy / connectivity — **not** CLIP alone |
-| 3 | **Checkpoint curves** | Validity vs structure vs steps (workshop-critical) |
-| 4 | **ID vs OOD composition** | Format learning vs compositional generalization |
-| 5 | **Human rubric (~50)** | Teaching usefulness / spatial correctness on a small set |
+### Broad-SVG (2k train)
 
-Optional secondary: CLIP / perceptual similarity — **supporting only**, never the primary structure claim.
+- Source pool: HF `starvector/svg-diagrams` train (~182k; pin revision; audit vs paper’s ~472 test definition)
+- Filter: parse/render, safety profile, length/element bounds
+- Dedup against SVG-Diagrams external test (~474) via normalized SVG hash + perceptual hash
+- Stratified sample to 2k under token budget
 
-**Success narrative:** curves and gap stories (“validity early, structure lags on OOD”), not a single headline %.
+### StructSVG (2k train / 250 ID / 250 OOD)
+
+| Grammar | Content |
+|---------|---------|
+| Workflows | Boxes, decisions, directed edges; Graphviz→SVG; scene-graph JSON |
+| Geometry | Points, segments, triangles/circles, incidence/containment/relative position |
+
+**Train/ID:** single branch or merge; ≤6 workflow nodes; unnested; single geometry relations.  
+**OOD:** branch+merge; nested groups; longer paths; unseen arrangements of seen primitives; (later) clean→noisy render.
+
+### External eval (not primary train)
+
+- **FlowGen** — topology / Strict F1 style after deterministic SVG conversion + triplet extraction  
+- **SVG-Diagrams test** — secondary DINO / comparability  
+
+Clean rasters first. Noisy whiteboard + iPad = test-only follow-up.
+
+---
+
+## 4. Metrics (pre-registered)
+
+| # | Metric | Role |
+|---|--------|------|
+| 1 | Parse / render validity | Syntax / H1 |
+| 2 | Typed entity F1 | Structure |
+| 3 | Typed relation F1 | Structure |
+| 4 | Spatial aggregate (reachability or geometry-relation acc.) | Structure |
+| 5 | DINO similarity | Secondary perceptual |
+| 6 | ID–OOD gap | Composition / H2 |
+| 7 | `t50` / `t90` emergence; area(syntax−structure) | Timing |
+
+Controls: correct image · shuffled image · blank image.
+
+Exact string match: **not** primary.
 
 ---
 
@@ -76,27 +86,31 @@ Optional secondary: CLIP / perceptual similarity — **supporting only**, never 
 | Observation | Interpretation |
 |-------------|----------------|
 | Validity ↑ early; structure flat (esp. OOD) | Supports H1/H2 |
-| Structure ↑ in lockstep with validity on ID **and** OOD | Falsifies H1/H2 as stated |
-| Base already strong on structure; SFT only tidies tags | Supports H3 strongly; paper becomes “sharpening” story |
-| Base near floor on both; SFT invents format *and* structure | Weakens H3; still useful if checkpoint timing differs |
+| Structure ↑ with validity on ID **and** OOD | Falsifies H1/H2 |
+| Broad ≈ structured on topology | Data-design claim weakened; still report |
+| Base already strong on structure | Supports H3; sharpening story |
+
+Do **not** change metrics post-hoc to rescue the hypothesis. Do **not** add RL to rescue v0.
 
 ---
 
-## 6. Compute assumptions (TBD — ask before train)
+## 6. Compute
 
-Assumed for planning (not locked): single GPU or Colab-class box capable of **2B–4B VLM LoRA**. Exact VRAM / local vs Colab: **open**.
+| Resource | Use |
+|----------|-----|
+| Local RTX 5060 8GB | E2B QLoRA overfit / smoke |
+| Modal (~$350) | E4B main runs; HF cache + adapter volumes |
+| Hard ceiling | User-set before full training |
 
 ---
 
-## 7. Deliverables for Aug 29
+## 7. Deliverables
 
 - Checkpoint curves (validity, structure, ID/OOD)  
-- Qualitative failure gallery (valid but wrong topology; collapsed hierarchy; template regurgitation)  
-- Short paper 4–5 pages (Pre→Post) + optional New In ML packaging  
-- Repro: data recipe, train config, eval scripts (this repo)
+- Broad vs StructSVG comparison  
+- Qualitative failure gallery  
+- 4–5 page Pre→Post draft + repro package  
 
----
+## 8. Deferred
 
-## 8. Explicitly deferred
-
-RL/verifiable rewards, multi-model bakeoff, full FT ablation, product Y integration, large web scrapes.
+Mixed SFT, RL, VFig/SVGenius, sequential tutor actions, iPad train, multi-seed if budget-bound.
