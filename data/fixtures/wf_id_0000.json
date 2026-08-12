@@ -1,0 +1,60 @@
+{
+  "grammar": "workflow",
+  "entities": [
+    {
+      "id": "n0",
+      "type": "decision",
+      "label": "Filter",
+      "bbox": [
+        10.0,
+        200.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n1",
+      "type": "decision",
+      "label": "Branch",
+      "bbox": [
+        210.0,
+        200.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    },
+    {
+      "id": "n2",
+      "type": "node",
+      "label": "Transform",
+      "bbox": [
+        410.0,
+        200.0,
+        100.0,
+        40.0
+      ],
+      "attrs": {}
+    }
+  ],
+  "relations": [
+    {
+      "src": "n0",
+      "dst": "n1",
+      "type": "edge",
+      "label": ""
+    },
+    {
+      "src": "n1",
+      "dst": "n2",
+      "type": "edge",
+      "label": ""
+    }
+  ],
+  "meta": {
+    "pattern": "chain",
+    "split": "id",
+    "idx": 0
+  }
+}

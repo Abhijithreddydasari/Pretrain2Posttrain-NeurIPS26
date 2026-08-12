@@ -1,0 +1,24 @@
+# Dataset provenance pins (fill revision SHAs after first successful download)
+
+svg_diagrams:
+  hf_id: starvector/svg-diagrams
+  revision: null  # pin after audit
+  note: >
+    Paper treats SVG-Diagrams as ~472 test examples from SVG-Stack.
+    HF currently exposes ~182k train + ~474 test — audit before training.
+
+flowgen:
+  hf_id: cuidongshan22/FlowGen
+  alt_hf_id: Anonymous112233/FlowGen
+  github: https://github.com/nju-websoft/FlowGen
+  license: Apache-2.0
+  revision: null
+
+structsvg:
+  version: "0.1"
+  grammars: [workflow, geometry]
+  train_n: 2000
+  id_n: 250
+  ood_n: 250
+  seed: 42
+  viewbox: "0 0 512 512"

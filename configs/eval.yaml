@@ -1,0 +1,33 @@
+canonical_viewbox: "0 0 512 512"
+max_elements: 200
+max_svg_chars: 20000
+min_drawable_elements: 2
+forbidden_tags:
+  - script
+  - foreignObject
+  - image
+  - animate
+  - animateTransform
+  - animateMotion
+  - set
+  - audio
+  - video
+metrics:
+  primary:
+    - parse_render_validity
+    - entity_f1
+    - relation_f1
+    - spatial_aggregate
+    - id_ood_gap
+    - emergence_t50_t90
+  secondary:
+    - dino_similarity
+    - compactness
+controls:
+  - correct
+  - shuffled
+  - blank
+checkpoints_pct: [0, 5, 10, 20, 40, 60, 80, 100]
+bootstrap_samples: 1000
+generation_cache_dir: outputs/generations
+metrics_dir: outputs/metrics

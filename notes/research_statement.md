@@ -1,6 +1,6 @@
 # Research Statement
 
-**Working title:** Can Post-Training Induce Structured Educational Drawing? Syntax vs Compositional Spatial Structure under SFT
+**Working title:** When Does Post-Training Buy SVG Syntax vs Diagram Structure?
 
 **Author status:** Solo-author OK. Package doubles as a cold-email research note to a faculty mentor.
 
@@ -16,15 +16,15 @@ https://newinml.github.io/NewInML2026NeurIPS/
 
 ## One-sentence claim (LIMA-style)
 
-> Post-training mainly teaches educational drawing **syntax / output format**; **compositional spatial / hierarchical structure** is the bottleneck and remains weak unless we explicitly design data and evaluation for it.
+> Post-training mainly teaches diagram **SVG syntax / output format**; **compositional spatial / topological structure** remains the bottleneck unless data and evaluation are designed for it.
 
 ---
 
 ## Research question
 
-Does LoRA SFT on a multimodal base VLM teach (a) markup/protocol validity and (b) compositional spatial structure for educational diagrams — and **when** does each emerge across training checkpoints?
+Does LoRA SFT on a multimodal **base** VLM teach (a) markup validity and (b) recoverable diagram structure for image→native-SVG reconstruction — and **when** does each emerge across training checkpoints?
 
-This is a mechanics / behavior-across-training study, not a SOTA drawing demo.
+This is a mechanics / behavior-across-training study, not an SVG SOTA demo.
 
 ---
 
@@ -32,79 +32,72 @@ This is a mechanics / behavior-across-training study, not a SOTA drawing demo.
 
 | ID | Hypothesis |
 |----|------------|
-| **H1** | Markup / SVG (or primitive-protocol) **validity rises early** in SFT. |
-| **H2** | **Compositional / spatial structure lags** and plateaus under plain SFT. |
+| **H1** | SVG **parse/render validity rises early** in SFT. |
+| **H2** | **Typed structure** (entities/relations) **lags** and plateaus under plain / broad SFT, especially on compositional OOD. |
 | **H3** | A multimodal **base** model already has **partial** diagram capability from pretraining; SFT mostly **sharpens format** more than structure. |
 
-**Falsification:** If structure metrics rise as fast as validity under plain SFT (in-domain and on the OOD compositional holdout), H1/H2 are wrong. If the base zero-shot is near floor on both axes and SFT must invent rather than sharpen, H3 is weakened.
+**Falsification:** If structure metrics rise at the same normalized rate as validity on ID **and** OOD under plain SFT, H1/H2 are wrong. If base is near floor on both axes and SFT invents rather than sharpens, H3 is weakened.
+
+---
+
+## Locked task
+
+```text
+diagram image  →  canonical native SVG reconstruction
+```
+
+- Not tutor-like “partial board + instruction → edit” (deferred).
+- Training examples **must include the image**.
+- Output: **canonical native SVG** only (see `notes/canonical_svg.md`).
+
+---
+
+## Locked experiment
+
+| Axis | Choice |
+|------|--------|
+| Model | `google/gemma-4-E4B` **base** (HF); local smoke: E2B + QLoRA on 8GB |
+| Train | LoRA / QLoRA SFT only; no full unfreeze; no RL in v0 |
+| Conditions | (1) base zero-shot (2) **2k broad-diagram** SFT (3) **2k StructSVG** SFT — matched token budget |
+| Primary bench | **StructSVG** — workflows + geometry; ID + compositional OOD |
+| External topology | **FlowGen** (node–edge triplets / Strict F1 style) |
+| Secondary | **SVG-Diagrams** perceptual/comparability (DINO); not the main claim |
+| Checkpoints | 0, 5, 10, 20, 40, 60, 80, 100% |
 
 ---
 
 ## Why this fits Pre→Post
 
-CFP axes we hit:
+- **Mechanics of post-training** — what one SFT stage buys for structured generation
+- **Behavior across training** — dense early checkpoint curves
+- **Failure modes** — valid SVG with wrong topology
+- **Evaluation & open science** — protocol, splits, reproducible small study
 
-- **Mechanics of post-training** — what does one SFT stage buy for structured generation?
-- **Behavior across training** — checkpoint curves for validity vs structure
-- **Failure modes / limits** — format competence without compositional competence
-- **Evaluation & open science** — protocol, splits, checkpoints, reproducible small study
-
-We are **not** pitching a whiteboard product or a leaderboard win.
+We are **not** pitching a whiteboard product or beating StarVector on SVG-Bench.
 
 ---
 
-## Task (standalone; Y is inspiration only)
+## Core metrics (pre-registered)
 
-**Input:** image of an educational diagram / board state (screenshot or rendered diagram).  
-**Output:** structured drawing in **one locked format** (prefer native SVG; compact primitive protocol acceptable if SVG proves too noisy).  
+1. Parse / render validity  
+2. Typed entity (node) F1  
+3. Typed relation (edge) F1  
+4. One spatial aggregate (workflow: reachability; geometry: relation accuracy)  
+5. DINO similarity (secondary)  
+6. ID–OOD gap  
+7. Emergence times `t50` / `t90` of base→final gain; area between syntax and structure curves  
 
-Training examples **must include the image**. Text-only SVG SFT is out of scope for the multimodal claim.
-
-Domain: educational diagrams only (trees, linked lists, free-body diagrams, simple graphs, etc.) — not logos, art, or handwriting style transfer.
-
----
-
-## Scientific style we emulate
-
-- **LIMA** — bold falsifiable claim + minimal intervention
-- **Chu et al. (SFT Memorizes, RL Generalizes)** — in-distribution vs OOD composition holdout; memorization vs generalization (**no RL in v0**)
-- **Tülu** — stages have jobs; attribute gains to checkpoints (v0 = one stage: LoRA SFT)
-
----
-
-## Intervention (v0)
-
-```text
-base VLM  →  LoRA SFT on educational image→drawing pairs  →  checkpoint eval
-```
-
-- Prefer true **base / pretrained** checkpoint (not instruct)
-- Primary model: `google/gemma-4-E2B` or `google/gemma-4-E4B` (HF, not Ollama IT tags)
-- Fallback: `OpenGVLab/InternVL3-2B-Pretrained` (or 1B)
-- Last resort: instruct VLM, framed as **continued post-training**, not induction from pretraining
-- **No** full-weight unfreeze for first run
-- **No** DPO / GRPO / RL until metrics exist
-
----
-
-## What success looks like
-
-Scientific observations such as:
-
-> “Validity jumps by mid-SFT; topology/composition metrics stay flat on OOD.”
-
-Not: “We achieve 82% validity.”
+Bootstrap over examples for CIs. Exact string match is **not** a primary metric.
 
 ---
 
 ## Non-goals (v0)
 
-- Whiteboard product UI
-- Preference / RL rabbit hole
-- 100k internet SVG scrape
-- Multi-model bakeoffs / giant models
-- Animation, handwriting style transfer, full multimodal agent stack
-- Dependence on product Y’s runtime
+- Whiteboard product UI / sequential draw trajectories  
+- DPO / GRPO / RL (until SFT curves exist)  
+- Training on full SVG-Stack / 100k+ scrapes  
+- Multi-model bakeoffs  
+- Mixed SFT, VFig/SVGenius, real-iPad train (follow-ups)
 
 ---
 
@@ -112,16 +105,18 @@ Not: “We achieve 82% validity.”
 
 | Window | Deliverable |
 |--------|-------------|
-| **Now (mailable)** | This statement + experiment card + repo scaffold |
-| **Week of lock** | Output schema + diagram taxonomy + eval harness stubs; confirm HF access + GPU |
-| **+1 week** | ~500–1000 filtered image→drawing pairs; ID / OOD splits; base zero-shot baseline |
-| **+2 weeks** | One LoRA SFT run; multi-checkpoint eval curves; qualitative failure gallery |
-| **Final week** | Short paper draft (4–5 pp Pre→Post); optional New In ML retune; OpenReview submit |
-
-Stretch only if core curves exist: tiny ablation (e.g. format-only vs structure-aware targets) or a second small model family.
+| Aug 12–13 | Locked contract, accounts, mailable note, repo setup |
+| Aug 14–16 | Eval harness + gold recovery; public filter; StructSVG pilot |
+| Aug 17–18 | Final splits; base baselines; overfit gates |
+| Aug 19–22 | Matched E4B SFT runs + checkpoint generation |
+| Aug 23–25 | Frozen eval, human audit, figures |
+| Aug 25–27 | Short paper draft |
+| Aug 28–29 | Repro dry-run + OpenReview submit |
 
 ---
 
-## Conflict note (chat export vs this lock)
+## Success looks like
 
-Earlier chat export briefly listed multimodality as out of scope and floated text→SVG. **This prompt wins:** the study is multimodal image→structured educational drawing. See `notes/decisions.md`.
+> “Validity jumps by mid-SFT; topology stays flat on compositional OOD under broad data; structure-designed data narrows the gap.”
+
+Not: “We achieve 82% validity.”
