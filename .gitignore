@@ -50,3 +50,6 @@ Thumbs.db
 # Large chat exports
 neurips_workshop_paper_conversation.md
 cursor_neurips_workshop_paper_submission.md
+
+# Local agent memory (not for git / OpenReview)
+AGENTS.md
