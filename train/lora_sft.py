@@ -59,48 +59,26 @@ def main():
         return
 
     # Heavy imports after dry-run gate
-    import torch
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-    from transformers import AutoModelForCausalLM, AutoProcessor, BitsAndBytesConfig, TrainingArguments
+    from transformers import TrainingArguments
     from trl import SFTTrainer
+
+    from train.model_load import load_vlm
 
     model_id = cfg["model_id"]
     if cfg.get("use_base_not_it") and model_id.endswith("-it"):
         raise ValueError("Refusing instruct checkpoint while use_base_not_it=true")
 
-    bnb = None
+    processor, model, loader = load_vlm(
+        model_id,
+        load_in_4bit=bool(cfg.get("load_in_4bit")),
+        dtype_name=cfg.get("torch_dtype", "bfloat16"),
+        trust_remote_code=cfg.get("trust_remote_code", True),
+        attn_implementation=cfg.get("attn_implementation", "sdpa"),
+    )
+    print(f"loaded {model_id} via {loader}")
+
     if cfg.get("load_in_4bit"):
-        bnb = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=getattr(torch, cfg.get("torch_dtype", "bfloat16")),
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
-
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=cfg.get("trust_remote_code", True))
-
-    # Prefer multimodal auto class when available
-    try:
-        from transformers import AutoModelForMultimodalLM
-
-        model = AutoModelForMultimodalLM.from_pretrained(
-            model_id,
-            quantization_config=bnb,
-            device_map="auto",
-            torch_dtype=getattr(torch, cfg.get("torch_dtype", "bfloat16")),
-            trust_remote_code=cfg.get("trust_remote_code", True),
-            attn_implementation=cfg.get("attn_implementation", "sdpa"),
-        )
-    except Exception:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            quantization_config=bnb,
-            device_map="auto",
-            torch_dtype=getattr(torch, cfg.get("torch_dtype", "bfloat16")),
-            trust_remote_code=cfg.get("trust_remote_code", True),
-        )
-
-    if bnb is not None:
         model = prepare_model_for_kbit_training(model)
 
     lcfg = cfg["lora"]

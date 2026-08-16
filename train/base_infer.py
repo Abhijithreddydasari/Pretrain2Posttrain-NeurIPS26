@@ -39,22 +39,17 @@ def main():
         return
 
     import torch
-    from transformers import AutoProcessor
+
+    from train.model_load import load_vlm
 
     model_id = cfg["model_id"]
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-    try:
-        from transformers import AutoModelForMultimodalLM
-
-        model = AutoModelForMultimodalLM.from_pretrained(
-            model_id, device_map="auto", torch_dtype=torch.bfloat16, trust_remote_code=True
-        )
-    except Exception:
-        from transformers import AutoModelForCausalLM
-
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, device_map="auto", torch_dtype=torch.bfloat16, trust_remote_code=True
-        )
+    processor, model, loader = load_vlm(
+        model_id,
+        load_in_4bit=bool(cfg.get("load_in_4bit", False)),
+        dtype_name=cfg.get("torch_dtype", "bfloat16"),
+        trust_remote_code=True,
+    )
+    print(f"loaded {model_id} via {loader}")
     model.eval()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

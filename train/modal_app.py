@@ -16,6 +16,7 @@ image = (
     .apt_install("libcairo2", "libgdk-pixbuf2.0-0", "libffi-dev", "shared-mime-info")
     .pip_install(
         "torch",
+        "torchvision",
         "transformers>=4.52",
         "accelerate",
         "peft",
@@ -33,6 +34,8 @@ image = (
         "scipy",
         "scikit-learn",
         "matplotlib",
+        "sentencepiece",
+        "protobuf",
     )
     .env({"HF_HOME": "/vol/hf", "HF_HUB_CACHE": "/vol/hf", "HF_XET_HIGH_PERFORMANCE": "1"})
 )
@@ -46,30 +49,75 @@ image = (
     volumes={"/vol/hf": vol_hf, "/vol/data": vol_data, "/vol/out": vol_out},
 )
 def smoke_e4b():
-    """Load Gemma 4 E4B base + tiny forward check; profile VRAM."""
+    """Load Gemma 4 E4B base with 4-bit BnB; profile VRAM.
+
+    Transformers 5: pass BitsAndBytesConfig, not load_in_4bit= on from_pretrained.
+    Use dtype= instead of torch_dtype=.
+    """
     import os
+    import traceback
 
     import torch
-    from transformers import AutoProcessor
+    from transformers import AutoProcessor, BitsAndBytesConfig
 
     model_id = "google/gemma-4-E4B"
-    assert os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"), "HF token missing"
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-    try:
-        from transformers import AutoModelForMultimodalLM
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    assert token, "HF token missing (Modal secret huggingface-secret)"
 
-        model = AutoModelForMultimodalLM.from_pretrained(
-            model_id,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            load_in_4bit=True,
-        )
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    load_kwargs = dict(
+        quantization_config=bnb,
+        device_map="auto",
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+    )
+
+    model = None
+    loader = None
+    errors: list[str] = []
+    import transformers as tf
+
+    for cls_name in ("AutoModelForMultimodalLM", "AutoModelForImageTextToText"):
+        cls = getattr(tf, cls_name, None)
+        if cls is None:
+            errors.append(f"{cls_name} missing")
+            continue
+        try:
+            model = cls.from_pretrained(model_id, **load_kwargs)
+            loader = cls_name
+            break
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{cls_name}: {type(e).__name__}: {e}")
+
+    if model is None:
+        return {
+            "ok": False,
+            "error": errors,
+            "traceback": traceback.format_exc()[-2000:],
+            "transformers": getattr(tf, "__version__", "?"),
+        }
+
+    n_params = sum(p.numel() for p in model.parameters())
     mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else None
+    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
     vol_out.commit()
-    return {"ok": True, "model_id": model_id, "max_mem_gb": mem, "processor": type(processor).__name__}
+    return {
+        "ok": True,
+        "model_id": model_id,
+        "loader": loader,
+        "processor": type(processor).__name__,
+        "n_params": n_params,
+        "max_mem_gb": round(mem, 2) if mem is not None else None,
+        "gpu": gpu,
+        "transformers": getattr(tf, "__version__", "?"),
+    }
 
 
 @app.function(

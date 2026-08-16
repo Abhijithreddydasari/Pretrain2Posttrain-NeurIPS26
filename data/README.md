@@ -12,6 +12,16 @@ data/
   fixtures/         tiny checked-in examples for tests
 ```
 
+## Public preview (do this first)
+
+The `data/fixtures/` SVGs are **gold-recovery stubs**, not the visual target. Do not scale StructSVG from them.
+
+```bash
+python -m data.scripts.preview_public_svg
+```
+
+Then open `data/processed/public_preview/gallery.html` in a browser.
+
 ## Conditions
 
 1. **Broad 2k** — filtered from `starvector/svg-diagrams` train pool  
