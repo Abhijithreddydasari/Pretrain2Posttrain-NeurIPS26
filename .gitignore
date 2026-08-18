@@ -13,11 +13,28 @@ __pycache__/
 !.env.example
 *.pem
 
-# Data & artifacts (keep fixtures)
-data/raw/
-data/processed/
+# Data & artifacts (keep fixtures only — never push raw/processed pipeline outputs)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
 !data/fixtures/
 !data/fixtures/**
+# Broad / StructSVG pipeline outputs (belt-and-suspenders if paths move)
+**/pool_index.parquet
+**/pool_svgs/
+**/train_manifest.jsonl
+**/candidates_pilot.jsonl
+**/test_hashes.jsonl
+**/errors.jsonl
+**/selection_stats.json
+**/scan_stats.json
+**/embed_meta.json
+**/visual_fp16.npy
+**/embeddings_shard_*.npy
+**/hf_revision.json
+data/**/*.parquet
+data/**/*.jsonl
 *.png
 *.jpg
 *.jpeg
@@ -25,6 +42,8 @@ data/processed/
 !data/fixtures/**/*.svg
 !eval/fixtures/**/*.svg
 !paper/figures/.gitkeep
+paper/figures/*.pdf
+paper/figures/*.png
 
 # Models / train outputs
 checkpoints/
@@ -53,3 +72,4 @@ cursor_neurips_workshop_paper_submission.md
 
 # Local agent memory (not for git / OpenReview)
 AGENTS.md
+gpt-chat.txt

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from structsvg_lib.svg_ops import TRAIN_RENDER_LONG_EDGE, render_pil
+
 
 def load_manifest(path: Path, max_samples: int | None = None) -> list[dict]:
     rows = []
@@ -24,14 +26,12 @@ def resolve_image(row: dict) -> Image.Image:
     if row.get("image_path") and Path(row["image_path"]).exists():
         return Image.open(row["image_path"]).convert("RGB")
     # render from svg if needed
-    from structsvg_lib.svg_ops import render_pil
-
     svg = row.get("svg")
     if not svg and row.get("svg_path"):
         svg = Path(row["svg_path"]).read_text(encoding="utf-8")
     if not svg:
         raise FileNotFoundError(f"no image/svg for {row.get('id')}")
-    return render_pil(svg, size=448)
+    return render_pil(svg, size=TRAIN_RENDER_LONG_EDGE)
 
 
 def resolve_svg(row: dict) -> str:

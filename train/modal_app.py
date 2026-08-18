@@ -28,6 +28,7 @@ image = (
         "lxml",
         "pyyaml",
         "cairosvg",
+        "resvg_py",
         "numpy",
         "tqdm",
         "jsonlines",
