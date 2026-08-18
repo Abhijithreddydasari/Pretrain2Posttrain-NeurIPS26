@@ -11,6 +11,7 @@ scipy>=1.11
 # Data / HF
 datasets>=2.19
 huggingface_hub>=0.24
+sentencepiece>=0.2
 requests>=2.31
 pyarrow>=15.0
 pandas>=2.0
