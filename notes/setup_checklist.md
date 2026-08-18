@@ -34,14 +34,15 @@ modal run train/modal_app.py --task smoke
 ## Datasets
 
 ```bash
-# StructSVG pilot (no HF needed)
-python -m data.scripts.generate_structsvg --pilot
-
-# Broad filter pilot (needs `datasets` + network)
-python -m data.scripts.filter_broad_svg --pilot
-
-# Optional: test-hash dedup file
+# Broad coreset (Phase A) — see data/README.md
 python -m data.scripts.build_test_hashes
+python -m data.scripts.broad_scan_pool --pilot
+python -m data.scripts.broad_embed --pilot
+python -m data.scripts.broad_select_coreset --pilot
+python -m data.scripts.broad_visualize --pilot
+
+# StructSVG pilot (Phase B; no HF needed)
+python -m data.scripts.generate_structsvg --pilot
 ```
 
 ## Gates before full train

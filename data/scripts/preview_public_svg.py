@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from structsvg_lib.broad_features import feature_bucket
 from structsvg_lib.svg_ops import extract_svg_blob, validate_svg
 
 
@@ -35,23 +36,6 @@ HTML_HEAD = """<!DOCTYPE html>
 </head>
 <body>
 """
-
-
-def feature_bucket(svg: str) -> str:
-    low = svg.lower()
-    n_text = low.count("<text")
-    n_rect = low.count("<rect")
-    n_line = low.count("<line") + low.count("<polyline")
-    n_path = low.count("<path")
-    if n_rect >= 2 and n_text >= 1 and n_line >= 1:
-        return "workflow_like"
-    if n_line >= 3 and n_text <= 3 and n_path <= 2:
-        return "geometry_like"
-    if n_path >= 5 and n_text == 0:
-        return "path_soup"
-    if n_text >= 1:
-        return "labeled"
-    return "other"
 
 
 def collect_svg_diagrams(split: str, n: int, scan_cap: int) -> list[dict]:

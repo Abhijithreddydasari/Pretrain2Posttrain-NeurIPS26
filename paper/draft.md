@@ -24,7 +24,8 @@ Image → canonical native SVG (`notes/canonical_svg.md`). Forbidden scripts/ras
 
 ## 4. Data
 
-- Broad 2k: filtered `starvector/svg-diagrams` train pool; dedup vs test hashes.
+**Broad 2k (SFT A).** From the HF `starvector/svg-diagrams` train pool (~182k), we retain canonical-parseable SVGs, remove exact and perceptual near-duplicates, and exclude examples matching the held-out SVG-Diagrams test split (normalized SHA256). Each diagram is embedded with SigLIP on a rendered raster and concatenated with structural feature vectors (tag counts, tree depth, path complexity, text density). We select 2,000 training examples via mini-batch k-means medoid sampling over ~4k clusters, with additional slots for high-complexity and rare-cluster coverage (Fig. `broad_coreset_coverage`, `broad_bucket_distribution`, `broad_difficulty_hist`).
+
 - StructSVG 2k / 250 ID / 250 OOD: workflows + geometry; scene-graph sidecars.
 - Eval external: FlowGen; SVG-Diagrams test (secondary).
 

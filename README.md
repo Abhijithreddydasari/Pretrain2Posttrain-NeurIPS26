@@ -54,8 +54,12 @@ python -m eval.gold_recovery
 # 2) Generate StructSVG pilot
 python -m data.scripts.generate_structsvg --pilot
 
-# 3) Filter broad candidates (streams HF; no full manual browse)
-python -m data.scripts.filter_broad_svg --pilot
+# 3) Broad SVG coreset (Phase A)
+python -m data.scripts.build_test_hashes
+python -m data.scripts.broad_scan_pool --pilot   # then full run without --pilot
+python -m data.scripts.broad_embed --pilot
+python -m data.scripts.broad_select_coreset --pilot
+python -m data.scripts.broad_visualize --pilot
 
 # 4) Local overfit smoke (8GB → E2B QLoRA)
 python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml
