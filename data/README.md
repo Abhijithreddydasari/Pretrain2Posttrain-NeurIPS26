@@ -28,7 +28,7 @@ Four stages under `data/processed/broad/`:
 # 0) Test-split dedup hashes
 python -m data.scripts.build_test_hashes
 
-# 1) Pilot (~5 min)
+# 1) Pilot (~5k scan → ~3–4k pool; embed all pool rows; select 40)
 python -m data.scripts.broad_scan_pool --pilot
 python -m data.scripts.broad_embed --pilot
 python -m data.scripts.broad_select_coreset --pilot

@@ -6,7 +6,7 @@ trust_remote_code: true
 torch_dtype: bfloat16
 attn_implementation: sdpa
 use_base_not_it: true
-max_image_tokens: 256
+max_soft_tokens: 560
 prompt_template: |
   Reconstruct the diagram as a single canonical SVG.
   Use viewBox="0 0 512 512". Output only SVG markup.

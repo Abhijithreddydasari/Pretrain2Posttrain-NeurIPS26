@@ -359,14 +359,13 @@ def resolve_pool_image(row: dict, render_size: int = 224):
 
     from structsvg_lib.svg_ops import render_pil
 
+    svg_path = ROOT / row["svg_path"]
     if row.get("png_path"):
         p = ROOT / row["png_path"]
         if p.exists():
             img = Image.open(p).convert("RGB")
-            if img.size != (render_size, render_size):
-                return img.resize((render_size, render_size))
-            return img
-    svg_path = ROOT / row["svg_path"]
+            if img.size == (render_size, render_size):
+                return img
     return render_pil(svg_path.read_text(encoding="utf-8"), size=render_size)
 
 

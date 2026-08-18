@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from data.scripts.broad_io import ErrorLogger, print_summary, progress_bar, write_json  # noqa: E402
-from data.scripts.broad_scan_pool import load_pool_index, resolve_pool_image, structural_matrix  # noqa: E402
+from data.scripts.broad_scan_pool import load_pool_index, structural_matrix  # noqa: E402
 from structsvg_lib.broad_features import dedup_by_phash  # noqa: E402
-from structsvg_lib.svg_ops import validate_svg
+from structsvg_lib.svg_ops import TRAIN_RENDER_LONG_EDGE, render_pil, validate_svg
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
@@ -29,7 +29,7 @@ ALLOC_COMPLEX = 300
 ALLOC_RARE = 200
 ALLOC_RESERVE = 100
 PHASH_NEAR_DUP = 3
-PNG_SIZE = 448
+TRAIN_RENDER_SIZE = TRAIN_RENDER_LONG_EDGE
 
 
 def combine_features(visual: np.ndarray, structural: np.ndarray, alpha: float = 2.0) -> np.ndarray:
@@ -57,7 +57,10 @@ def select_coreset(
     df = load_pool_index(pool_path)
     visual = np.load(visual_path)
     if len(df) != len(visual):
-        raise RuntimeError(f"pool rows {len(df)} != embeddings {len(visual)}")
+        raise RuntimeError(
+            f"pool rows {len(df)} != embeddings {len(visual)}; "
+            "re-run: python -m data.scripts.broad_embed --fresh"
+        )
 
     if pilot:
         target_n = min(40, len(df))
@@ -287,17 +290,9 @@ def _materialize_assets(
             dst_svg = svg_out / f"{row_id}.svg"
             shutil.copy2(src, dst_svg)
             dst_png = png_out / f"{row_id}.png"
-            pool_png = ROOT / r["png_path"] if r.get("png_path") else None
-            if pool_png and pool_png.exists():
-                from PIL import Image
-
-                img = Image.open(pool_png).convert("RGB")
-                if img.size != (PNG_SIZE, PNG_SIZE):
-                    img = img.resize((PNG_SIZE, PNG_SIZE))
-                img.save(dst_png)
-            else:
-                img = resolve_pool_image(r.to_dict(), render_size=PNG_SIZE)
-                img.save(dst_png)
+            # Always re-render from SVG at training resolution (never upscale scan cache).
+            img = render_pil(svg_text, size=TRAIN_RENDER_SIZE)
+            img.save(dst_png)
 
             row = {
                 "id": row_id,

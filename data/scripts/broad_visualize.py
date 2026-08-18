@@ -186,7 +186,7 @@ def _plot_thumbnail_grid(df, selected_idx: set[int], path: Path, *, pilot: bool)
         ax.axis("off")
         try:
             svg_path = ROOT / df.iloc[idx]["svg_path"]
-            img = render_pil(svg_path.read_text(encoding="utf-8"), size=128)
+            img = render_pil(svg_path.read_text(encoding="utf-8"), size=512)
             ax.imshow(img)
             ax.set_title(str(df.iloc[idx]["bucket"])[:12], fontsize=8)
             rendered += 1

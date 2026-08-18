@@ -42,20 +42,67 @@ def _load_model(device: str):
     return processor, model, torch
 
 
+def _clear_embedding_cache(out_dir: Path) -> None:
+    emb_dir = out_dir / "embeddings"
+    if not emb_dir.exists():
+        return
+    for pattern in ("embeddings_shard_*.npy", "embeddings_shard_*.json"):
+        for path in emb_dir.glob(pattern):
+            path.unlink()
+    visual = emb_dir / "visual_fp16.npy"
+    if visual.exists():
+        visual.unlink()
+
+
+def _existing_embedding_rows(out_dir: Path) -> int | None:
+    visual_path = out_dir / "embeddings" / "visual_fp16.npy"
+    meta_path = out_dir / "embed_meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if "rows" in meta:
+                return int(meta["rows"])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    if visual_path.exists():
+        return int(np.load(visual_path).shape[0])
+    shard_dir = _shard_dir(out_dir)
+    if not any(shard_dir.glob("embeddings_shard_*.npy")):
+        return None
+    max_idx = -1
+    for meta_path in shard_dir.glob("embeddings_shard_*.json"):
+        try:
+            indices = json.loads(meta_path.read_text(encoding="utf-8"))["indices"]
+            if indices:
+                max_idx = max(max_idx, max(indices))
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+    return max_idx + 1 if max_idx >= 0 else 0
+
+
 def embed_pool(
     out_dir: Path,
     *,
     batch_size: int = DEFAULT_BATCH,
     pilot: bool = False,
     device: str | None = None,
+    fresh: bool = False,
 ) -> dict:
     pool_path = out_dir / "pool_index.parquet"
     if not pool_path.exists():
         raise FileNotFoundError(f"missing {pool_path}; run broad_scan_pool first")
 
     df = load_pool_index(pool_path)
-    if pilot:
-        df = df.head(min(200, len(df)))
+    pool_n = len(df)
+    existing_rows = _existing_embedding_rows(out_dir)
+    if fresh or (existing_rows is not None and existing_rows != pool_n):
+        if existing_rows is not None and existing_rows != pool_n:
+            logging.warning(
+                "pool has %d rows but embeddings cover %d; clearing stale embedding cache",
+                pool_n,
+                existing_rows,
+            )
+        _clear_embedding_cache(out_dir)
 
     import torch
 
@@ -139,6 +186,7 @@ def embed_pool(
     _write_final(visual, out_dir, n, bs, device)
     stats = {
         "rows": n,
+        "pool_rows": pool_n,
         "device": device,
         "batch_size": bs,
         "model": SIGLIP_MODEL,
@@ -201,14 +249,27 @@ def _write_final(visual: np.ndarray, out_dir: Path, n: int, batch_size: int, dev
 
 def main():
     ap = argparse.ArgumentParser(description="Embed broad pool with SigLIP")
-    ap.add_argument("--pilot", action="store_true")
+    ap.add_argument("--pilot", action="store_true", help="metadata only; embeds the full pool")
+    ap.add_argument("--fresh", action="store_true", help="drop cached shards/embeddings and re-embed")
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "processed" / "broad")
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH)
     ap.add_argument("--device", type=str, default=None)
     args = ap.parse_args()
 
-    stats = embed_pool(args.out, batch_size=args.batch_size, pilot=args.pilot, device=args.device)
-    print_summary("embed", kept=stats["rows"], errors_logged=stats.get("errors_logged", 0), device=stats["device"])
+    stats = embed_pool(
+        args.out,
+        batch_size=args.batch_size,
+        pilot=args.pilot,
+        device=args.device,
+        fresh=args.fresh,
+    )
+    print_summary(
+        "embed",
+        scanned=stats["rows"],
+        kept=stats["rows"],
+        errors_logged=stats.get("errors_logged", 0),
+        device=stats["device"],
+    )
     print(f"wrote {args.out / 'embeddings' / 'visual_fp16.npy'}")
 
 

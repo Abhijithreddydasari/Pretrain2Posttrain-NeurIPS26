@@ -26,6 +26,9 @@ DRAWABLE = {"rect", "circle", "ellipse", "line", "polyline", "polygon", "path", 
 ALLOWED = DRAWABLE | {"svg", "g", "defs", "marker", "title", "desc", "tspan", "clipPath"}
 NS = {"svg": "http://www.w3.org/2000/svg"}
 DEFAULT_VIEWBOX = "0 0 512 512"
+# Gemma 4 vision: height/width should be divisible by 48; 960 ≈ 560-token budget class.
+TRAIN_RENDER_LONG_EDGE = 960
+DEFAULT_LETTERBOX_BG = (255, 255, 255)
 
 # svglib lacks many CSS color names; map before raster fallback.
 _NAMED_COLORS: dict[str, str] = {
@@ -316,23 +319,104 @@ def validate_svg(
     return out
 
 
-def _render_png_bytes_backends(svg: str, size: int) -> tuple[bytes | None, list[str]]:
-    """Try raster backends in order; return PNG bytes or accumulated errors."""
+def _parse_viewbox_aspect(root: ET.Element) -> float:
+    vb = root.get("viewBox") or root.get("viewbox")
+    if vb:
+        parts = re.split(r"[\s,]+", vb.strip())
+        if len(parts) >= 4:
+            try:
+                w = float(parts[2])
+                h = float(parts[3])
+                if h > 0:
+                    return w / h
+            except ValueError:
+                pass
+    try:
+        w = float(_parse_dim_value(root.get("width", "1") or "1") or 1.0)
+        h = float(_parse_dim_value(root.get("height", "1") or "1") or 1.0)
+        if h > 0:
+            return w / h
+    except (TypeError, ValueError):
+        pass
+    return 1.0
+
+
+def svg_aspect_ratio(svg: str) -> float:
+    """Width/height from root viewBox (after preprocess)."""
+    svg = preprocess_svg_for_render(svg)
+    root, err = parse_svg(svg)
+    if err or root is None:
+        return 1.0
+    return _parse_viewbox_aspect(root)
+
+
+def _letterbox_image(img, size: int, bg: tuple[int, int, int] = DEFAULT_LETTERBOX_BG):
+    from PIL import Image
+
+    img = img.convert("RGB")
+    w, h = img.size
+    if w <= 0 or h <= 0:
+        raise ValueError(f"invalid image size {w}x{h}")
+    scale = min(size / w, size / h)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    if (nw, nh) != (w, h):
+        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (size, size), bg)
+    canvas.paste(img, ((size - nw) // 2, (size - nh) // 2))
+    return canvas
+
+
+def _render_png_bytes_backends(
+    svg: str,
+    size: int,
+    *,
+    preserve_aspect: bool = True,
+    letterbox: bool = True,
+) -> tuple[bytes | None, list[str]]:
+    """Try raster backends; optionally preserve aspect + letterbox to size×size."""
     errors: list[str] = []
+    aspect = svg_aspect_ratio(svg) if preserve_aspect else 1.0
     with _quiet_svg_render():
         try:
             import resvg_py
 
-            png = resvg_py.svg_to_bytes(svg_string=svg, width=size, height=size)
+            if preserve_aspect:
+                if aspect >= 1.0:
+                    png = resvg_py.svg_to_bytes(svg_string=svg, width=size)
+                else:
+                    png = resvg_py.svg_to_bytes(svg_string=svg, height=size)
+            else:
+                png = resvg_py.svg_to_bytes(svg_string=svg, width=size, height=size)
             if png:
+                if letterbox:
+                    from PIL import Image
+
+                    img = Image.open(io.BytesIO(png)).convert("RGB")
+                    png_buf = io.BytesIO()
+                    _letterbox_image(img, size).save(png_buf, format="PNG")
+                    return png_buf.getvalue(), errors
                 return png, errors
         except Exception as e:  # noqa: BLE001
             errors.append(f"resvg_py: {e}")
         try:
             import cairosvg
 
-            png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_width=size, output_height=size)
+            if preserve_aspect and abs(aspect - 1.0) > 1e-3:
+                if aspect >= 1.0:
+                    png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_width=size)
+                else:
+                    png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_height=size)
+            else:
+                png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_width=size, output_height=size)
             if png:
+                if letterbox:
+                    from PIL import Image
+
+                    img = Image.open(io.BytesIO(png)).convert("RGB")
+                    png_buf = io.BytesIO()
+                    _letterbox_image(img, size).save(png_buf, format="PNG")
+                    return png_buf.getvalue(), errors
                 return png, errors
         except Exception as e:  # noqa: BLE001
             errors.append(f"cairosvg: {e}")
@@ -346,6 +430,13 @@ def _render_png_bytes_backends(svg: str, size: int) -> tuple[bytes | None, list[
             else:
                 png = renderPM.drawToString(drawing, fmt="PNG")
                 if png:
+                    if letterbox:
+                        from PIL import Image
+
+                        img = Image.open(io.BytesIO(png)).convert("RGB")
+                        png_buf = io.BytesIO()
+                        _letterbox_image(img, size).save(png_buf, format="PNG")
+                        return png_buf.getvalue(), errors
                     return png, errors
         except Exception as e:  # noqa: BLE001
             errors.append(f"svglib: {e}")
@@ -373,11 +464,11 @@ def render_png_bytes(svg: str, size: int = 256) -> tuple[bool, str | None]:
     return False, f"render error: {errors[-1] if errors else 'unknown'}"
 
 
-def render_pil(svg: str, size: int = 256):
+def render_pil(svg: str, size: int = 256, *, letterbox: bool = True):
     from PIL import Image
 
     svg = preprocess_svg_for_render(svg)
-    png, errors = _render_png_bytes_backends(svg, size)
+    png, errors = _render_png_bytes_backends(svg, size, preserve_aspect=True, letterbox=letterbox)
     if png is not None:
         return Image.open(io.BytesIO(png)).convert("RGB")
     joined = " | ".join(errors)
