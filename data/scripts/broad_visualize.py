@@ -14,7 +14,7 @@ from sklearn.decomposition import PCA
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from data.scripts.broad_io import progress_bar, write_json  # noqa: E402
+from data.scripts.broad_io import progress_bar, resolve_asset_path, write_json  # noqa: E402
 from data.scripts.broad_scan_pool import load_pool_index, structural_matrix  # noqa: E402
 from data.scripts.broad_select_coreset import combine_features  # noqa: E402
 from structsvg_lib.svg_ops import render_pil
@@ -44,13 +44,20 @@ def _load_selected_indices(out_dir: Path) -> set[int]:
     return indices
 
 
-def visualize(out_dir: Path, *, pilot: bool = False, alpha: float = 2.0, seed: int = 42) -> dict:
+def visualize(
+    out_dir: Path,
+    *,
+    pilot: bool = False,
+    alpha: float = 2.0,
+    seed: int = 42,
+    fig_dir: Path | None = None,
+) -> dict:
     pool_path = out_dir / "pool_index.parquet"
     visual_path = out_dir / "embeddings" / "visual_fp16.npy"
     if not pool_path.exists() or not visual_path.exists():
         raise FileNotFoundError("run scan + embed before visualize")
 
-    fig_dir = ROOT / "paper" / "figures"
+    fig_dir = fig_dir or (out_dir / "figures")
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     df = load_pool_index(pool_path)
@@ -185,7 +192,7 @@ def _plot_thumbnail_grid(df, selected_idx: set[int], path: Path, *, pilot: bool)
     for ax, idx in zip(axes_flat, picks):
         ax.axis("off")
         try:
-            svg_path = ROOT / df.iloc[idx]["svg_path"]
+            svg_path = resolve_asset_path(df.iloc[idx]["svg_path"])
             img = render_pil(svg_path.read_text(encoding="utf-8"), size=512)
             ax.imshow(img)
             ax.set_title(str(df.iloc[idx]["bucket"])[:12], fontsize=8)
@@ -210,10 +217,12 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "processed" / "broad")
     ap.add_argument("--alpha", type=float, default=2.0)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--fig-dir", type=Path, default=None, help="output figures dir (default paper/figures)")
     args = ap.parse_args()
 
-    stats = visualize(args.out, pilot=args.pilot, alpha=args.alpha, seed=args.seed)
-    print(f"wrote figures to {ROOT / 'paper' / 'figures'}: {stats['figures']}")
+    stats = visualize(args.out, pilot=args.pilot, alpha=args.alpha, seed=args.seed, fig_dir=args.fig_dir)
+    out_fig = args.fig_dir or (args.out / "figures")
+    print(f"wrote figures to {out_fig}: {stats['figures']}")
 
 
 if __name__ == "__main__":

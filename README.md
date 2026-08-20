@@ -18,11 +18,14 @@ Standalone NeurIPS 2026 workshop research package.
 | Model | `google/gemma-4-E4B` base (local smoke: E2B QLoRA @ 8GB) |
 | Conditions | Base · 2k broad diagrams · 2k StructSVG (workflows + geometry) |
 | Eval | Validity, entity/relation F1, spatial aggregate, ID/OOD, dense checkpoints |
-| External | FlowGen topology; SVG-Diagrams DINO (secondary) |
+| Eval | Validity, entity/relation F1, spatial aggregate, ID/OOD, dense checkpoints |
+| External | FlowGen topology; SVG-Diagrams DINO; **VFIG-Bench** (eval only, no VFIG train in v0) |
 
 ## Non-goals (v0)
 
-Whiteboard UI, RL, full SVG-Stack training, multi-model bakeoffs, sequential tutor actions.
+Whiteboard UI, RL, full SVG-Stack training, training on VFIG-Data, multi-model bakeoffs, sequential tutor actions.
+
+**Optional after Gemma curves:** one additional open **base** VLM replication; VFIG-Bench scoring on existing checkpoints.
 
 ## Layout
 

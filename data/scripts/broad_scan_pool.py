@@ -11,8 +11,7 @@ import argparse
 import logging
 import os
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +25,7 @@ from data.scripts.broad_io import (  # noqa: E402
     RejectionCounter,
     load_test_hashes,
     print_summary,
+    resolve_asset_path,
     retry_hf,
     write_json,
 )
@@ -44,7 +44,13 @@ DEFAULT_TOTAL = 182_618
 MAX_SVG_CHARS = 20_000
 PHASH_NEAR_DUP = 3
 SCAN_RENDER_SIZE = 224
-_RENDER_LOCK = threading.Lock()
+
+
+def _default_workers() -> int:
+    """Process pool on Linux/Modal; single worker on Windows (svglib fallback is not MP-safe)."""
+    if os.name == "nt":
+        return 1
+    return min(8, os.cpu_count() or 4)
 
 
 def _load_dataset_stream(revision: str | None):
@@ -144,6 +150,9 @@ def _pass_a_cheap_filter(
 
 def _render_worker(task: dict) -> dict:
     """Pass B worker: single render → phash + write SVG/PNG."""
+    # ProcessPoolExecutor children may not inherit repo layout; Modal sets PYTHONPATH=/root.
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
     root = Path(task["root"])
     try:
         from structsvg_lib.svg_ops import perceptual_hash_from_image, render_pil
@@ -151,13 +160,12 @@ def _render_worker(task: dict) -> dict:
         normalized = task["normalized"]
         svg_path = root / task["svg_rel"]
         png_path = root / task["png_rel"]
-        with _RENDER_LOCK:
-            img = render_pil(normalized, size=task.get("render_size", SCAN_RENDER_SIZE))
-            phash = perceptual_hash_from_image(img)
-            svg_path.parent.mkdir(parents=True, exist_ok=True)
-            png_path.parent.mkdir(parents=True, exist_ok=True)
-            svg_path.write_text(normalized, encoding="utf-8")
-            img.save(png_path)
+        img = render_pil(normalized, size=task.get("render_size", SCAN_RENDER_SIZE))
+        phash = perceptual_hash_from_image(img)
+        svg_path.parent.mkdir(parents=True, exist_ok=True)
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        svg_path.write_text(normalized, encoding="utf-8")
+        img.save(png_path)
         return {
             **{k: v for k, v in task.items() if k != "normalized"},
             "phash": phash,
@@ -213,11 +221,9 @@ def _pass_b_render(
                 errors.log("scan_b", out.get("id", "?"), out.get("sha256"), "RenderError", out.get("error", ""))
             progress.tick(kept=len(rendered), rejected=counter.counts.get("render_fail", 0))
     else:
-        logging.warning(
-            "pass B: svg render backends are not thread-safe; workers=%d uses a global lock (sequential render).",
-            workers,
-        )
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        executor_cls = ProcessPoolExecutor if os.name != "nt" else ThreadPoolExecutor
+        logging.info("pass B: rendering with %s workers=%d", executor_cls.__name__, workers)
+        with executor_cls(max_workers=workers) as pool:
             futures = {pool.submit(_render_worker, t): t for t in tasks}
             for fut in as_completed(futures):
                 out = fut.result()
@@ -253,7 +259,7 @@ def scan_pool(
         max_rows = max_rows or 5_000
 
     if workers is None:
-        workers = 1  # render backends (svglib/cairo) are not safely parallel on Windows
+        workers = _default_workers()
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir = out_dir.resolve()
@@ -359,9 +365,9 @@ def resolve_pool_image(row: dict, render_size: int = 224):
 
     from structsvg_lib.svg_ops import render_pil
 
-    svg_path = ROOT / row["svg_path"]
+    svg_path = resolve_asset_path(row["svg_path"])
     if row.get("png_path"):
-        p = ROOT / row["png_path"]
+        p = resolve_asset_path(row["png_path"])
         if p.exists():
             img = Image.open(p).convert("RGB")
             if img.size == (render_size, render_size):
@@ -377,7 +383,7 @@ def main():
     ap.add_argument("--revision", type=str, default=None)
     ap.add_argument("--test-dedup", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--workers", type=int, default=1, help="pass B render workers (default 1; backends not thread-safe)")
+    ap.add_argument("--workers", type=int, default=None, help="pass B render workers (default: 8 on Linux, 1 on Windows)")
     args = ap.parse_args()
 
     stats = scan_pool(

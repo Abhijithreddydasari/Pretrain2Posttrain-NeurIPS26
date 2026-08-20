@@ -154,6 +154,30 @@ def load_jsonl_ids(path: Path, key: str = "id") -> list[str]:
     return ids
 
 
+def resolve_asset_path(path: str | Path, *, root: Path | None = None) -> Path:
+    """Resolve manifest/parquet asset path (repo-relative or absolute)."""
+    p = Path(path)
+    if p.is_file():
+        return p
+    base = (root or ROOT).resolve()
+    cand = base / p
+    if cand.is_file():
+        return cand
+    if p.exists():
+        return p.resolve()
+    return cand
+
+
+def configure_broad_logging() -> None:
+    """Quiet third-party noise; keep stage summaries readable."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    for name in ("httpx", "httpcore", "filelock", "datasets", "urllib3", "transformers"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def write_json(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2), encoding="utf-8")

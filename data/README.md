@@ -39,17 +39,45 @@ python -m data.scripts.broad_scan_pool
 python -m data.scripts.broad_embed
 python -m data.scripts.broad_select_coreset
 python -m data.scripts.broad_visualize
+
+# 3) Modal full run (recommended for ~182k scan)
+modal run data/scripts/modal_broad_app.py --stage all
+# pilot on Modal:
+modal run data/scripts/modal_broad_app.py --stage all --pilot
+
+# Per-stage gates (local or after Modal download):
+python -m data.scripts.broad_checks --stage scan
+python -m data.scripts.broad_checks --stage embed
+python -m data.scripts.broad_checks --stage select
+python -m data.scripts.broad_checks --stage all --pilot
 ```
 
-**Outputs:** `train_manifest.jsonl` (2k), `scan_stats.json`, `selection_stats.json`, `errors.jsonl`, figures in `paper/figures/`.
+**Outputs:** `train_manifest.jsonl` (2k), `scan_stats.json`, `selection_stats.json`, `errors.jsonl`, figures in `data/processed/broad/figures/` (or pass `--fig-dir paper/figures`).
 
 Set `BROAD_TQDM=0` to disable progress bars (e.g. in CI).
 
 ## Conditions
 
-1. **Broad 2k** — coreset from `starvector/svg-diagrams` train pool  
-2. **StructSVG 2k** — workflows + geometry with scene-graph sidecars  
+| Condition | Train source | Role |
+|-----------|--------------|------|
+| **Broad 2k** | Coreset from `starvector/svg-diagrams` train pool | Heterogeneous real diagram SVG syntax |
+| **StructSVG 2k** | `generate_structsvg.py` (workflows + geometry) | Structure-designed data with gold scene graphs |
 
-External eval only: FlowGen, SVG-Diagrams test (~474).
+**External eval only (never train):** FlowGen, SVG-Diagrams test (~474), **VFIG-Bench** (see below).
 
 Do not commit raw HF dumps, large PNG grids, or model outputs.
+
+## VFIG data — where it fits (and where it does not)
+
+[VFIG](https://arxiv.org/abs/2603.24575) released **VFIG-Data** (~66k image–SVG pairs on HF `QijiaHe/VFIG-Data`) and **VFIG-Bench** (held-out scientific figures). We do **not** fold VFIG into the locked Broad 2k condition for v0 — that would change provenance and break the matched Broad vs StructSVG comparison mid-pipeline.
+
+| Use | v0 (Aug 29) | Later |
+|-----|-------------|-------|
+| **VFIG-Bench eval** | Secondary external bench: score base + SFT checkpoints (validity, component metrics, optional VLM-judge) | Primary comparability to VFIG paper |
+| **VFIG-Data as train** | No — keep Broad = StarVector pool | Optional 2k coreset ablation (“VFIG-shaped broad”) or curriculum stage |
+| **VFIG-Data-Shapes-and-Arrows** (~6.5k) | No | Primitive-heavy third condition (closest to VFIG stage-1 curriculum) |
+| **Cross-dedup** | If sampling VFIG later, dedup vs Broad + SVG-Diagrams test hashes | Same `build_test_hashes` + phash pipeline |
+
+**Recommended v0 path:** finish StarVector broad coreset → train Gemma → eval on StructSVG (primary) + VFIG-Bench subset (secondary, no training on VFIG-Data).
+
+Adapter script (planned): `data/scripts/vfig_to_manifest.py` — render figures, normalize to `notes/canonical_svg.md`, emit eval manifest only.

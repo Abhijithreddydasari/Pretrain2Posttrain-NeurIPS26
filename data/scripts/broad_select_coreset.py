@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from data.scripts.broad_io import ErrorLogger, print_summary, progress_bar, write_json  # noqa: E402
+from data.scripts.broad_io import ErrorLogger, print_summary, progress_bar, resolve_asset_path, write_json  # noqa: E402
 from data.scripts.broad_scan_pool import load_pool_index, structural_matrix  # noqa: E402
 from structsvg_lib.broad_features import dedup_by_phash  # noqa: E402
 from structsvg_lib.svg_ops import TRAIN_RENDER_LONG_EDGE, render_pil, validate_svg
@@ -157,6 +157,7 @@ def select_coreset(
     # Post-selection phash dedup with backfill
     selected = _dedup_phash(selected, df, remaining, selection_reason, target_n, rng)
 
+    _clean_asset_dirs(out_dir)
     manifest_rows = _materialize_assets(df, selected, selection_reason, out_dir, pilot=pilot, target_n=target_n, rng=rng)
 
     if len(manifest_rows) < target_n and not pilot:
@@ -244,6 +245,14 @@ def _dedup_phash(
     return kept
 
 
+def _clean_asset_dirs(out_dir: Path) -> None:
+    """Remove stale train PNG/SVG dirs so re-select cannot leave mixed resolutions."""
+    for name in ("pngs", "svgs"):
+        d = out_dir / name
+        if d.exists():
+            shutil.rmtree(d)
+
+
 def _materialize_assets(
     df,
     selected: list[int],
@@ -279,7 +288,7 @@ def _materialize_assets(
         r = df.iloc[pool_idx]
         row_id = f"broad_{r['id']}"[:64]
         try:
-            src = ROOT / r["svg_path"]
+            src = resolve_asset_path(r["svg_path"])
             if not src.exists():
                 raise FileNotFoundError(f"missing {src}")
             svg_text = src.read_text(encoding="utf-8")

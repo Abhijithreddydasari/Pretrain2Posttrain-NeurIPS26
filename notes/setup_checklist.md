@@ -15,12 +15,48 @@ huggingface-cli login
 # or: $env:HF_TOKEN="hf_..."
 ```
 
-## Modal
+## Modal (broad data pipeline)
+
+1. Same HF secret as train: **`huggingface-secret`** with `HF_TOKEN`
+2. Volume **`structsvg-data`** stores outputs at `data/processed/broad/` on the volume
+3. Pilot on Modal:
+
+```bash
+modal run data/scripts/modal_broad_app.py --stage all --pilot
+```
+
+4. Full 182k run:
+
+```bash
+modal run data/scripts/modal_broad_app.py --stage all
+```
+
+5. Re-embed from scratch if pool changed:
+
+```bash
+modal run data/scripts/modal_broad_app.py --stage embed --fresh-embed
+```
+
+6. Validate outputs (runs on volume):
+
+```bash
+modal run data/scripts/modal_broad_app.py --stage check
+```
+
+7. Download volume artifacts locally (example):
+
+```bash
+modal volume get structsvg-data broad/train_manifest.jsonl data/processed/broad/
+modal volume get structsvg-data broad/pngs data/processed/broad/pngs
+```
+
+Deps for the Modal image are pinned in `requirements-broad-modal.txt`.
+
+## Modal (E4B train smoke)
 
 1. `pip install modal` then `modal setup`
-2. Create secret **`huggingface-secret`** with key `HF_TOKEN` (Modal dashboard → Secrets)
-3. Set a hard spend ceiling mentally (~$350 credits); prefer L4/A10G profiling before A100
-4. Smoke:
+2. Set a spend ceiling (~$350 credits); profile L4/A10G before A100
+3. Smoke:
 
 ```bash
 modal run train/modal_app.py --task smoke
@@ -51,7 +87,9 @@ python -m data.scripts.generate_structsvg --pilot
 2. `python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml --dry-run`  
 3. Local or Modal overfit 16–32 examples  
 4. Shuffled/blank image control on a handful of preds  
-5. Then launch matched broad vs StructSVG E4B runs  
+5. `python -m data.scripts.broad_checks --stage all` (or `--pilot`) → all gates PASS  
+6. Spot-check 20–30 PNGs in `data/processed/broad/pngs/` are **960×960** and readable  
+7. Then launch matched broad vs StructSVG E4B runs  
 
 ## Outreach
 

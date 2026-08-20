@@ -111,6 +111,17 @@ Do **not** change metrics post-hoc to rescue the hypothesis. Do **not** add RL t
 - Qualitative failure gallery  
 - 4–5 page Pre→Post draft + repro package  
 
-## 8. Deferred
+## Deferred
 
-Mixed SFT, RL, VFig/SVGenius, sequential tutor actions, iPad train, multi-seed if budget-bound.
+Mixed SFT, RL, VFig/SVGenius **training**, sequential tutor actions, iPad train, multi-seed if budget-bound.
+
+### VFIG (eval first, train later)
+
+- **v0:** VFIG-Bench as secondary external eval on Gemma base + SFT checkpoints (no training on `QijiaHe/VFIG-Data`).
+- **v1+:** Optional 2k coreset from VFIG-Data-Complex-Diagrams as a third broad-style condition; Shapes-and-Arrows subset for curriculum-like ablation. Dedup vs Broad + SVG-Diagrams test before any train use.
+
+### Multi-model replication (optional)
+
+Workshop fit does **not** require multiple families in v0. The primary pre→post bridge is **Gemma 4 E4B base @ 0%** vs SFT checkpoints on the **same** weights.
+
+If budget allows after Gemma: add **one** open **base** VLM (not VFIG’s instruct backbones), same manifests and StructSVG eval, sparse checkpoints (e.g. 0/20/60/100%) — tests whether syntax-before-structure timing replicates across pretraining recipes.
