@@ -84,29 +84,32 @@ About 1.1% of scanned rows survive to the final set. Most drops happen at the VF
 
 The coreset has **687** workflow_like, **1,296** labeled, and **17** geometry_like examples. Selection upsampled workflow_like diagrams slightly relative to the pool while keeping cluster coverage via SigLIP + structural-feature medoids.
 
-<p align="center">
-  <img src="assets/broad_funnel.png" alt="182k to 2k funnel" width="520"/>
-  <br/>
-  <em>Funnel: HF train stream → filtered pool → 2k coreset.</em>
-</p>
-
-<p align="center">
-  <img src="assets/broad_rejections.png" alt="Rejection breakdown" width="520"/>
-  <br/>
-  <em>Where rows drop out before selection.</em>
-</p>
-
-<p align="center">
-  <img src="assets/broad_bucket_proportions.png" alt="Bucket proportions in pool vs coreset" width="520"/>
-  <br/>
-  <em>Pool vs selected bucket mix.</em>
-</p>
-
-<p align="center">
-  <img src="assets/broad_coreset_coverage.png" alt="PCA coverage of pool vs coreset" width="520"/>
-  <br/>
-  <em>SigLIP + structural features: pool (gray) vs selected (color).</em>
-</p>
+<table border="0" cellspacing="20" cellpadding="0" align="center">
+  <tr>
+    <td align="center" valign="top" width="50%">
+      <img src="assets/broad_funnel.png" alt="182k to 2k funnel" width="440"/>
+      <br/>
+      <em>Funnel: HF train stream → filtered pool → 2k coreset.</em>
+    </td>
+    <td align="center" valign="top" width="50%">
+      <img src="assets/broad_rejections.png" alt="Rejection breakdown" width="440"/>
+      <br/>
+      <em>Where rows drop out before selection.</em>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="top" width="50%">
+      <img src="assets/broad_bucket_proportions.png" alt="Bucket proportions in pool vs coreset" width="440"/>
+      <br/>
+      <em>Pool vs selected bucket mix.</em>
+    </td>
+    <td align="center" valign="top" width="50%">
+      <img src="assets/broad_coreset_coverage.png" alt="PCA coverage of pool vs coreset" width="440"/>
+      <br/>
+      <em>SigLIP + structural features: pool (gray) vs selected (color).</em>
+    </td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="assets/broad_thumbnail_grid.png" alt="Sample thumbnails from coreset" width="640"/>
