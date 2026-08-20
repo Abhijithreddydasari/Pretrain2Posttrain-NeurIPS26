@@ -32,7 +32,7 @@ train:
   report_to: none
   seed: 42
 data:
-  manifest: data/processed/broad/train_manifest.jsonl
+  manifest: data/processed/svg_diagrams/train_manifest.jsonl
   max_samples: 2000
   match_token_budget: true
 checkpoints_pct: [0, 5, 10, 20, 40, 60, 80, 100]

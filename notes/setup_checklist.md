@@ -18,7 +18,7 @@ huggingface-cli login
 ## Modal (broad data pipeline)
 
 1. Same HF secret as train: **`huggingface-secret`** with `HF_TOKEN`
-2. Volume **`structsvg-data`** stores outputs at `data/processed/broad/` on the volume
+2. Volume **`structsvg-data`** stores pipeline outputs under `broad/` on the volume; download full run to **`data/processed/svg_diagrams/`** locally
 3. Pilot on Modal:
 
 ```bash
@@ -46,8 +46,10 @@ modal run data/scripts/modal_broad_app.py --stage check
 7. Download volume artifacts locally (example):
 
 ```bash
-modal volume get structsvg-data broad/train_manifest.jsonl data/processed/broad/
-modal volume get structsvg-data broad/pngs data/processed/broad/pngs
+modal volume get structsvg-data broad/train_manifest.jsonl data/processed/svg_diagrams/
+modal volume get structsvg-data broad/pngs data/processed/svg_diagrams/
+modal volume get structsvg-data broad/scan_stats.json data/processed/svg_diagrams/
+python -m data.scripts.broad_analyze --out data/processed/svg_diagrams
 ```
 
 Deps for the Modal image are pinned in `requirements-broad-modal.txt`.
@@ -88,7 +90,7 @@ python -m data.scripts.generate_structsvg --pilot
 3. Local or Modal overfit 16–32 examples  
 4. Shuffled/blank image control on a handful of preds  
 5. `python -m data.scripts.broad_checks --stage all` (or `--pilot`) → all gates PASS  
-6. Spot-check 20–30 PNGs in `data/processed/broad/pngs/` are **960×960** and readable  
+6. Spot-check 20–30 PNGs in `data/processed/svg_diagrams/pngs/` are **960×960** and readable  
 7. Then launch matched broad vs StructSVG E4B runs  
 
 ## Outreach
