@@ -2,14 +2,14 @@
 
 Does SFT on a multimodal base VLM teach **valid SVG first**, and **diagram structure** (entities, connections, layout) only later?
 
-This repo is the code and data for a short paper aimed at the NeurIPS 2026 workshop [*Transitioning from Pre-Training to Post-Training*](https://pretrain2posttrain.github.io/call.html) (deadline Aug 29, 2026 AoE). The task is fixed: **diagram image → canonical native SVG**. We are not building a whiteboard app or chasing SVG-Bench SOTA.
+This repo is the code and data for a short paper aimed at the NeurIPS 2026 workshop [*Transitioning from Pre-Training to Post-Training*](https://pretrain2posttrain.github.io/call.html) (deadline Aug 29, 2026 AoE).
 
 The setup is deliberately small and matched. **Gemma 4 E4B base**, LoRA SFT only, two 2k training conditions with similar token budgets:
 
 1. **Broad** - heterogeneous public diagrams from `starvector/svg-diagrams`, filtered and coreset-selected.
 2. **StructSVG** - controlled workflows + geometry with gold scene graphs and a compositional OOD split.
 
-Primary eval is on StructSVG (validity, typed entity/relation F1, spatial aggregates). We save dense checkpoints (0, 5, 10, 20, 40, 60, 80, 100%) to see *when* syntax and structure move, not just final numbers. VFIG-Bench is secondary eval only; we borrowed their code filter for broad curation but do not train on VFIG-Data in v0.
+Primary eval is on StructSVG (validity, typed entity/relation F1, spatial aggregates). We save dense checkpoints (0, 5, 10, 20, 40, 60, 80, 100%) to see *when* syntax and structure move. VFIG-Bench is secondary eval only; we borrowed their code filter for broad curation but do not train on VFIG-Data in v0.
 
 **Working claim:** post-training mostly buys SVG syntax/format; compositional structure lags unless the data and eval are built for it.
 
