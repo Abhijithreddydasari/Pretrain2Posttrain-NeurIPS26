@@ -1,4 +1,4 @@
-# Pretrain2Posttrain
+# Pretrain2Posttrain Workshops, NeurIPS 2026
 
 Does SFT on a multimodal base VLM teach **valid SVG first**, and **diagram structure** (entities, connections, layout) only later?
 
