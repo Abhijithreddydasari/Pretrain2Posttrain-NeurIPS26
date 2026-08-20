@@ -19,6 +19,29 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def repo_relative(out_dir: Path, rel: str) -> str:
+    """Repo-relative posix path for manifests/parquet (Modal-safe: no resolve())."""
+    p = out_dir / rel
+    try:
+        return p.relative_to(ROOT).as_posix()
+    except ValueError:
+        return f"data/processed/broad/{rel}".replace("\\", "/")
+
+
+def resolve_asset_path(path: str | Path, *, root: Path | None = None) -> Path:
+    """Resolve manifest/parquet asset path (repo-relative or absolute)."""
+    p = Path(path)
+    if p.is_file():
+        return p
+    base = root or ROOT
+    cand = base / p
+    if cand.is_file():
+        return cand
+    if p.is_absolute() and p.exists():
+        return p
+    return cand
+
+
 def tqdm_enabled() -> bool:
     if os.environ.get("BROAD_TQDM", "1").strip() in ("0", "false", "False"):
         return False
@@ -152,20 +175,6 @@ def load_jsonl_ids(path: Path, key: str = "id") -> list[str]:
         if line:
             ids.append(json.loads(line)[key])
     return ids
-
-
-def resolve_asset_path(path: str | Path, *, root: Path | None = None) -> Path:
-    """Resolve manifest/parquet asset path (repo-relative or absolute)."""
-    p = Path(path)
-    if p.is_file():
-        return p
-    base = (root or ROOT).resolve()
-    cand = base / p
-    if cand.is_file():
-        return cand
-    if p.exists():
-        return p.resolve()
-    return cand
 
 
 def configure_broad_logging() -> None:

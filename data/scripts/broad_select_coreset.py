@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from data.scripts.broad_io import ErrorLogger, print_summary, progress_bar, resolve_asset_path, write_json  # noqa: E402
+from data.scripts.broad_io import ErrorLogger, print_summary, progress_bar, repo_relative, resolve_asset_path, write_json  # noqa: E402
 from data.scripts.broad_scan_pool import load_pool_index, structural_matrix  # noqa: E402
 from structsvg_lib.broad_features import dedup_by_phash  # noqa: E402
 from structsvg_lib.svg_ops import TRAIN_RENDER_LONG_EDGE, render_pil, validate_svg
@@ -264,7 +264,6 @@ def _materialize_assets(
     rng: random.Random,
 ) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    root = ROOT.resolve()
     svg_out = out_dir / "svgs"
     png_out = out_dir / "pngs"
     svg_out.mkdir(parents=True, exist_ok=True)
@@ -312,8 +311,8 @@ def _materialize_assets(
                 "difficulty": float(r["difficulty"]),
                 "selection_reason": reasons.get(pool_idx, "unknown"),
                 "cluster_pool_idx": int(pool_idx),
-                "svg_path": str(dst_svg.resolve().relative_to(root).as_posix()),
-                "image_path": str(dst_png.resolve().relative_to(root).as_posix()),
+                "svg_path": repo_relative(out_dir, f"svgs/{row_id}.svg"),
+                "image_path": repo_relative(out_dir, f"pngs/{row_id}.png"),
                 "source": r["source"],
             }
             if pilot:

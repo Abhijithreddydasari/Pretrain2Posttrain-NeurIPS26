@@ -104,3 +104,45 @@ def test_medoid_pick_deterministic():
     pick_a = int(np.argmin(dists))
     pick_b = int(np.argmin(dists))
     assert pick_a == pick_b
+
+
+def test_vfig_code_filter_accepts_workflow():
+    from structsvg_lib.broad_features import vfig_code_filter
+
+    ok, reason, m = vfig_code_filter(WORKFLOW_SVG)
+    assert ok, reason
+    assert m["vfig_clean"] >= 0.40
+    assert m["vfig_C"] <= 50
+
+
+def test_vfig_rejects_path_heavy_no_primitives():
+    from structsvg_lib.broad_features import vfig_code_filter
+
+    svg = "<svg>" + "".join(f'<path d="M{i} 0 L{i} 1"/>' for i in range(8)) + "</svg>"
+    ok, reason, m = vfig_code_filter(svg)
+    assert not ok
+    assert reason == "vfig_low_clean"
+    assert m["vfig_C"] == 8
+
+
+def test_vfig_rejects_too_many_complex_shapes():
+    from structsvg_lib.broad_features import vfig_code_filter
+
+    # Enough rects so Clean >= 0.40, but C > 50 triggers second rule.
+    svg = "<svg>" + "".join(f'<rect x="{i}" y="0" width="1" height="1"/>' for i in range(60))
+    svg += "".join(f'<path d="M{i} 0 L{i} 1"/>' for i in range(51))
+    svg += "</svg>"
+    ok, reason, m = vfig_code_filter(svg)
+    assert not ok
+    assert reason == "vfig_too_many_complex"
+    assert m["vfig_C"] == 51
+    assert m["vfig_clean"] >= 0.40
+
+
+def test_repo_relative_modal_safe():
+    from data.scripts.broad_io import ROOT, repo_relative
+
+    out = ROOT / "data" / "processed" / "broad"
+    rel = repo_relative(out, "pool_svgs/abc.svg")
+    assert rel == "data/processed/broad/pool_svgs/abc.svg"
+    assert rel.replace("\\", "/") == "data/processed/broad/pool_svgs/abc.svg"

@@ -26,27 +26,50 @@ FIG_ROOT = BROAD_ROOT / "figures"
 hf_secret = modal.Secret.from_name("huggingface-secret")
 vol_data = modal.Volume.from_name("structsvg-data", create_if_missing=True)
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Modal requires all build steps (pip, env, …) before add_local_* — local pilot skips this image.
-broad_image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git")
-    .pip_install_from_requirements(str(_REPO_ROOT / "requirements-broad-modal.txt"))
-    .env(
-        {
-            "PYTHONPATH": "/root",
-            "HF_HOME": "/tmp/hf",
-            "HF_HUB_CACHE": "/tmp/hf",
-            "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
-            "TRANSFORMERS_VERBOSITY": "error",
-            "BROAD_TQDM": "1",
-            "TOKENIZERS_PARALLELISM": "false",
-        }
+def _local_repo_root() -> Path:
+    """Repo checkout root (must contain requirements-broad-modal.txt)."""
+    p = Path(__file__).resolve()
+    for parent in [p.parent, *p.parents]:
+        if (parent / "requirements-broad-modal.txt").is_file():
+            return parent
+    raise FileNotFoundError(
+        "requirements-broad-modal.txt not found — create it at repo root before modal run"
     )
-    .add_local_dir(str(_REPO_ROOT / "structsvg_lib"), remote_path="/root/structsvg_lib")
-    .add_local_dir(str(_REPO_ROOT / "data" / "scripts"), remote_path="/root/data/scripts")
+
+
+_BROAD_ENV = {
+    "PYTHONPATH": "/root",
+    "HF_HOME": "/tmp/hf",
+    "HF_HUB_CACHE": "/tmp/hf",
+    "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+    "TRANSFORMERS_VERBOSITY": "error",
+    "BROAD_TQDM": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+}
+
+# Base image steps run at deploy time (local). On Modal workers, is_local() is False and
+# the deployed image snapshot is used — do not reference checkout-only paths there.
+broad_image = modal.Image.debian_slim(python_version="3.11").apt_install(
+    "git",
+    "fontconfig",
+    "fonts-dejavu-core",
+    "fonts-liberation",
+    "fonts-freefont-ttf",
 )
+
+if modal.is_local():
+    _repo_root = _local_repo_root()
+    # env before add_local_* (Modal forbids build steps after local mounts)
+    broad_image = (
+        broad_image
+        .pip_install_from_requirements(str(_repo_root / "requirements-broad-modal.txt"))
+        .env(_BROAD_ENV)
+        .add_local_dir(str(_repo_root / "structsvg_lib"), remote_path="/root/structsvg_lib")
+        .add_local_dir(str(_repo_root / "data" / "scripts"), remote_path="/root/data/scripts")
+    )
+else:
+    broad_image = broad_image.env(_BROAD_ENV)
 
 VOLUME_MOUNTS = {"/root/data/processed": vol_data}
 
@@ -130,13 +153,20 @@ def stage_scan(*, pilot: bool = False, max_rows: int | None = None, workers: int
     memory=16384,
     timeout=4 * 60 * 60,
 )
-def stage_embed(*, pilot: bool = False, fresh: bool = False, batch_size: int = 64) -> dict:
+def stage_embed(*, pilot: bool = False, fresh: bool = False, batch_size: int = 128) -> dict:
     _setup(require_hf=True)
     from data.scripts.broad_checks import check_embed
     from data.scripts.broad_embed import embed_pool
 
-    print(f"[stage:embed] pilot={pilot} fresh={fresh} out={BROAD_ROOT}")
-    stats = embed_pool(BROAD_ROOT, pilot=pilot, fresh=fresh, batch_size=batch_size)
+    print(f"[stage:embed] pilot={pilot} fresh={fresh} batch_size={batch_size} out={BROAD_ROOT}")
+    stats = embed_pool(
+        BROAD_ROOT,
+        pilot=pilot,
+        fresh=fresh,
+        batch_size=batch_size,
+        preload=False,
+        io_workers=16,
+    )
     result = check_embed(BROAD_ROOT)
     result["embed_stats"] = stats
     _print_gate("embed", result)
@@ -217,12 +247,13 @@ def main(
     target_n: int = 2000,
     max_rows: int | None = None,
     workers: int = 8,
+    embed_batch_size: int = 128,
 ):
     """Run broad pipeline stages on Modal with per-stage gates."""
     stages = {
         "test_hashes": lambda: stage_test_hashes.remote(),
         "scan": lambda: stage_scan.remote(pilot=pilot, max_rows=max_rows, workers=workers),
-        "embed": lambda: stage_embed.remote(pilot=pilot, fresh=fresh_embed),
+        "embed": lambda: stage_embed.remote(pilot=pilot, fresh=fresh_embed, batch_size=embed_batch_size),
         "select": lambda: stage_select.remote(pilot=pilot, target_n=target_n),
         "visualize": lambda: stage_visualize.remote(pilot=pilot),
         "check": lambda: stage_check.remote(pilot=pilot, target_n=target_n),

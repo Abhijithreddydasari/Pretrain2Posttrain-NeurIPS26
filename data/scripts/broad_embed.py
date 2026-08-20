@@ -4,7 +4,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -13,13 +16,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from data.scripts.broad_io import ErrorLogger, print_summary, progress_bar, write_json  # noqa: E402
-from data.scripts.broad_scan_pool import load_pool_index, resolve_pool_image  # noqa: E402
+from data.scripts.broad_scan_pool import load_pool_index, load_pool_png  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 SIGLIP_MODEL = "google/siglip-base-patch16-224"
 DEFAULT_BATCH = 64
 RENDER_SIZE = 224
+DEFAULT_IO_WORKERS = min(16, (os.cpu_count() or 4) * 2)
 
 
 def _shard_dir(out_dir: Path) -> Path:
@@ -80,6 +84,91 @@ def _existing_embedding_rows(out_dir: Path) -> int | None:
     return max_idx + 1 if max_idx >= 0 else 0
 
 
+def _load_one_png(df, idx: int, *, out_dir: Path, render_size: int, errors: ErrorLogger):
+    r = df.iloc[idx]
+    try:
+        return idx, load_pool_png(r.to_dict(), out_dir=out_dir, render_size=render_size)
+    except Exception as e:  # noqa: BLE001
+        errors.log("embed", str(r.get("id", idx)), r.get("sha256"), type(e).__name__, str(e))
+        return idx, None
+
+
+def _load_batch(
+    df,
+    batch_indices: list[int],
+    *,
+    out_dir: Path,
+    render_size: int,
+    errors: ErrorLogger,
+    workers: int,
+) -> tuple[list[object], list[int]]:
+    """Load one embed batch; returns (images, valid_indices) in index order."""
+    if not batch_indices:
+        return [], []
+    if len(batch_indices) == 1 or workers <= 1:
+        pairs = [_load_one_png(df, i, out_dir=out_dir, render_size=render_size, errors=errors) for i in batch_indices]
+    else:
+        pairs = [None] * len(batch_indices)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [
+                pool.submit(_load_one_png, df, idx, out_dir=out_dir, render_size=render_size, errors=errors)
+                for idx in batch_indices
+            ]
+            for j, fut in enumerate(futs):
+                pairs[j] = fut.result()
+        pairs = [p for p in pairs if p is not None]
+
+    images: list[object] = []
+    valid_indices: list[int] = []
+    for idx, img in pairs:
+        if img is not None:
+            valid_indices.append(idx)
+            images.append(img)
+    return images, valid_indices
+
+
+class _BatchPrefetcher:
+    """Overlap PNG reads for batch N+1 while GPU embeds batch N (one batch in flight)."""
+
+    def __init__(
+        self,
+        df,
+        *,
+        out_dir: Path,
+        render_size: int,
+        errors: ErrorLogger,
+        workers: int,
+    ) -> None:
+        self._df = df
+        self._out_dir = out_dir
+        self._render_size = render_size
+        self._errors = errors
+        self._workers = workers
+        self._pool = ThreadPoolExecutor(max_workers=1)
+        self._pending: Future | None = None
+
+    def submit(self, batch_indices: list[int]) -> None:
+        self._pending = self._pool.submit(
+            _load_batch,
+            self._df,
+            batch_indices,
+            out_dir=self._out_dir,
+            render_size=self._render_size,
+            errors=self._errors,
+            workers=self._workers,
+        )
+
+    def result(self) -> tuple[list[object], list[int]]:
+        if self._pending is None:
+            return [], []
+        images, valid = self._pending.result()
+        self._pending = None
+        return images, valid
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=False)
+
+
 def embed_pool(
     out_dir: Path,
     *,
@@ -87,6 +176,8 @@ def embed_pool(
     pilot: bool = False,
     device: str | None = None,
     fresh: bool = False,
+    preload: bool | None = None,
+    io_workers: int | None = None,
 ) -> dict:
     pool_path = out_dir / "pool_index.parquet"
     if not pool_path.exists():
@@ -107,7 +198,9 @@ def embed_pool(
     import torch
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    t0 = time.perf_counter()
     processor, model, torch_mod = _load_model(device)
+    model_load_s = time.perf_counter() - t0
 
     shard_dir = _shard_dir(out_dir)
     errors = ErrorLogger(out_dir / "errors.jsonl")
@@ -116,71 +209,119 @@ def embed_pool(
     shard_idx = _completed_shards(shard_dir)
     start_row = shard_idx * bs
 
+    io_workers = io_workers or DEFAULT_IO_WORKERS
+    do_preload = preload is True  # off by default — stream batches (O(batch) RAM, scales to full pool)
+
+    image_cache = None
+    preload_s = 0.0
+    if do_preload and start_row < n:
+        t_pre = time.perf_counter()
+        logging.warning(
+            "preload loads all %d PNGs into RAM (~%.0f MB); prefer default stream mode for full pool",
+            n,
+            n * RENDER_SIZE * RENDER_SIZE * 3 / 1e6,
+        )
+        cache: list = [None] * n
+        for row in range(0, n, bs):
+            batch_indices = list(range(row, min(row + bs, n)))
+            imgs, valid = _load_batch(
+                df, batch_indices, out_dir=out_dir, render_size=RENDER_SIZE, errors=errors, workers=io_workers
+            )
+            for idx, img in zip(valid, imgs):
+                cache[idx] = img
+        image_cache = cache
+        preload_s = time.perf_counter() - t_pre
+    elif start_row < n:
+        logging.info("streaming pool PNGs with batch prefetch (%d io workers, n=%d)", io_workers, n)
+
     if start_row >= n:
         visual = _concat_shards(shard_dir, n)
         _write_final(visual, out_dir, n, bs, device)
         return {"rows": n, "device": device, "resumed": True}
 
-    indices = list(range(n))
     n_batches = (n + bs - 1) // bs
     bar = progress_bar(total=n_batches, desc="embedding", unit="batch", initial=shard_idx)
 
     row = start_row
     batch_i = shard_idx
+    infer_start = time.perf_counter()
+    prefetcher: _BatchPrefetcher | None = None
 
-    while row < n:
-        end = min(row + bs, n)
-        batch_indices = indices[row:end]
-        images = []
-        valid_indices: list[int] = []
+    with torch_mod.inference_mode():
+        if image_cache is None and start_row < n:
+            prefetcher = _BatchPrefetcher(
+                df, out_dir=out_dir, render_size=RENDER_SIZE, errors=errors, workers=io_workers
+            )
+            # Prime pipeline: start loading first batch before model warm-up completes.
+            first_end = min(start_row + bs, n)
+            prefetcher.submit(list(range(start_row, first_end)))
 
-        for idx in batch_indices:
-            r = df.iloc[idx]
+        while row < n:
+            end = min(row + bs, n)
+
+            if image_cache is not None:
+                images = []
+                valid_indices = []
+                for idx in range(row, end):
+                    img = image_cache[idx]
+                    if img is not None:
+                        images.append(img)
+                        valid_indices.append(idx)
+            elif prefetcher is not None:
+                images, valid_indices = prefetcher.result()
+                if end < n:
+                    next_end = min(end + bs, n)
+                    prefetcher.submit(list(range(end, next_end)))
+            else:
+                images, valid_indices = _load_batch(
+                    df,
+                    list(range(row, end)),
+                    out_dir=out_dir,
+                    render_size=RENDER_SIZE,
+                    errors=errors,
+                    workers=io_workers,
+                )
+
+            if not images:
+                row = end
+                batch_i += 1
+                bar.update(1)
+                continue
+
             try:
-                img = resolve_pool_image(r.to_dict(), render_size=RENDER_SIZE)
-                images.append(img)
-                valid_indices.append(idx)
-            except Exception as e:  # noqa: BLE001
-                errors.log("embed", str(r.get("id", idx)), r.get("sha256"), type(e).__name__, str(e))
-
-        if not images:
-            row = end
-            batch_i += 1
-            bar.update(1)
-            continue
-
-        try:
-            inputs = processor(images=images, return_tensors="pt").to(device)
-            with torch_mod.no_grad():
+                inputs = processor(images=images, return_tensors="pt").to(device, non_blocking=True)
                 feats = model.get_image_features(**inputs)
                 feats = feats / feats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-            emb = feats.cpu().numpy().astype(np.float16)
-            np.save(shard_dir / f"embeddings_shard_{batch_i:04d}.npy", emb)
-            meta_path = shard_dir / f"embeddings_shard_{batch_i:04d}.json"
-            meta_path.write_text(json.dumps({"indices": valid_indices}), encoding="utf-8")
-        except RuntimeError as e:
-            if "out of memory" in str(e).lower() and bs > 1:
-                bs = max(1, bs // 2)
-                logging.warning("OOM — halving batch size to %d", bs)
+                emb = feats.cpu().numpy().astype(np.float16)
+                np.save(shard_dir / f"embeddings_shard_{batch_i:04d}.npy", emb)
+                meta_path = shard_dir / f"embeddings_shard_{batch_i:04d}.json"
+                meta_path.write_text(json.dumps({"indices": valid_indices}), encoding="utf-8")
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower() and bs > 1:
+                    bs = max(1, bs // 2)
+                    logging.warning("OOM — halving batch size to %d", bs)
+                    continue
+                errors.log("embed", f"batch_{batch_i}", None, "OOM", str(e))
+                row = end
+                batch_i += 1
+                bar.update(1)
                 continue
-            errors.log("embed", f"batch_{batch_i}", None, "OOM", str(e))
-            row = end
-            batch_i += 1
-            bar.update(1)
-            continue
-        except Exception as e:  # noqa: BLE001
-            errors.log("embed", f"batch_{batch_i}", None, type(e).__name__, str(e))
-            row = end
-            batch_i += 1
-            bar.update(1)
-            continue
+            except Exception as e:  # noqa: BLE001
+                errors.log("embed", f"batch_{batch_i}", None, type(e).__name__, str(e))
+                row = end
+                batch_i += 1
+                bar.update(1)
+                continue
 
-        row = end
-        batch_i += 1
-        bar.update(1)
-        bar.set_postfix(row=row, batch_size=bs)
+            row = end
+            batch_i += 1
+            bar.update(1)
+            bar.set_postfix(row=row, batch_size=bs)
 
     bar.close()
+    if prefetcher is not None:
+        prefetcher.close()
+    infer_s = time.perf_counter() - infer_start
 
     visual = _build_aligned_matrix(df, shard_dir, n)
     _write_final(visual, out_dir, n, bs, device)
@@ -192,6 +333,14 @@ def embed_pool(
         "model": SIGLIP_MODEL,
         "pilot": pilot,
         "errors_logged": errors.count,
+        "preload": do_preload,
+        "io_workers": io_workers,
+        "timing_s": {
+            "model_load": round(model_load_s, 2),
+            "preload": round(preload_s, 2),
+            "inference": round(infer_s, 2),
+            "total": round(time.perf_counter() - t0, 2),
+        },
     }
     write_json(out_dir / "embed_meta.json", stats)
     return stats
@@ -254,6 +403,8 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "processed" / "broad")
     ap.add_argument("--batch-size", type=int, default=DEFAULT_BATCH)
     ap.add_argument("--device", type=str, default=None)
+    ap.add_argument("--preload", action="store_true", help="load all PNGs into RAM first (not for full ~70k pool)")
+    ap.add_argument("--io-workers", type=int, default=None, help="parallel PNG loaders per batch (default 16)")
     args = ap.parse_args()
 
     stats = embed_pool(
@@ -262,6 +413,8 @@ def main():
         pilot=args.pilot,
         device=args.device,
         fresh=args.fresh,
+        preload=args.preload,
+        io_workers=args.io_workers,
     )
     print_summary(
         "embed",

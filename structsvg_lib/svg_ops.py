@@ -5,9 +5,11 @@ import contextlib
 import hashlib
 import io
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -72,6 +74,30 @@ _RENDERER_NOISE = (
     "unable to resolve percentage unit",
 )
 
+# Graphviz / diagram SVGs often request FreeSans; map to an installed sans font.
+_FONT_FAMILY_MAP: dict[str, str] = {
+    "freesans": "DejaVu Sans",
+    "free sans": "DejaVu Sans",
+    "freeserif": "DejaVu Serif",
+    "freemono": "DejaVu Sans Mono",
+    "helvetica": "DejaVu Sans",
+    "arial": "DejaVu Sans",
+    "sans-serif": "DejaVu Sans",
+    "times": "DejaVu Serif",
+    "times new roman": "DejaVu Serif",
+    "courier": "DejaVu Sans Mono",
+    "courier new": "DejaVu Sans Mono",
+    "monospace": "DejaVu Sans Mono",
+}
+
+if os.name == "nt":
+    _WIN_FONT_MAP = {
+        "DejaVu Sans": "Arial",
+        "DejaVu Serif": "Times New Roman",
+        "DejaVu Sans Mono": "Courier New",
+    }
+    _FONT_FAMILY_MAP = {_k: _WIN_FONT_MAP.get(_v, _v) for _k, _v in _FONT_FAMILY_MAP.items()}
+
 
 class _FilteredStderr:
     """Drop known-noisy svglib/reportlab stderr lines during rasterization."""
@@ -120,18 +146,74 @@ def _quiet_svg_render():
 
 
 def preprocess_svg_for_render(svg: str) -> str:
-    """Normalize fill/stroke color names svglib cannot parse."""
+    """Normalize colors and font families before rasterization."""
 
-    def _repl(match: re.Match[str]) -> str:
+    def _color_repl(match: re.Match[str]) -> str:
         attr, val = match.group(1), match.group(2).strip().lower()
         mapped = _NAMED_COLORS.get(val)
         if mapped:
             return f'{attr}="{mapped}"'
         return match.group(0)
 
-    out = re.sub(r'(fill|stroke)\s*=\s*"([^"]+)"', _repl, svg, flags=re.IGNORECASE)
-    out = re.sub(r"(fill|stroke)\s*=\s*'([^']+)'", _repl, out, flags=re.IGNORECASE)
+    def _font_repl(match: re.Match[str]) -> str:
+        raw = match.group(1).strip().strip('"\'')
+        mapped = _FONT_FAMILY_MAP.get(raw.lower())
+        if mapped:
+            return f'font-family="{mapped}"'
+        return match.group(0)
+
+    out = re.sub(r'(fill|stroke)\s*=\s*"([^"]+)"', _color_repl, svg, flags=re.IGNORECASE)
+    out = re.sub(r"(fill|stroke)\s*=\s*'([^']+)'", _color_repl, out, flags=re.IGNORECASE)
+    out = re.sub(r'font-family="([^"]*)"', _font_repl, out, flags=re.IGNORECASE)
+    out = re.sub(r"font-family='([^']*)'", _font_repl, out, flags=re.IGNORECASE)
     return out
+
+
+def _default_sans_font() -> str:
+    return "Arial" if os.name == "nt" else "DejaVu Sans"
+
+
+def _resvg_font_dirs() -> list[str]:
+    if os.name == "nt":
+        return []
+    candidates = (
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/truetype/liberation",
+        "/usr/share/fonts/truetype/freefont",
+        "/usr/share/fonts",
+    )
+    return [p for p in candidates if Path(p).is_dir()]
+
+
+def _ensure_rgb(img, bg: tuple[int, int, int] = DEFAULT_LETTERBOX_BG):
+    """Composite transparency onto white — naive .convert('RGB') turns alpha black."""
+    from PIL import Image
+
+    if img.mode in ("RGBA", "LA"):
+        canvas = Image.new("RGB", img.size, bg)
+        canvas.paste(img, mask=img.split()[-1])
+        return canvas
+    if img.mode == "P" and "transparency" in img.info:
+        return _ensure_rgb(img.convert("RGBA"), bg=bg)
+    return img.convert("RGB")
+
+
+def _resvg_to_png(svg: str, *, width: int | None = None, height: int | None = None) -> bytes:
+    import resvg_py
+
+    kwargs: dict[str, Any] = {
+        "svg_string": svg,
+        "background": "white",
+        "sans_serif_family": _default_sans_font(),
+    }
+    if width is not None:
+        kwargs["width"] = width
+    if height is not None:
+        kwargs["height"] = height
+    font_dirs = _resvg_font_dirs()
+    if font_dirs:
+        kwargs["font_dirs"] = font_dirs
+    return resvg_py.svg_to_bytes(**kwargs)
 
 
 def _local(tag: str) -> str:
@@ -353,7 +435,7 @@ def svg_aspect_ratio(svg: str) -> float:
 def _letterbox_image(img, size: int, bg: tuple[int, int, int] = DEFAULT_LETTERBOX_BG):
     from PIL import Image
 
-    img = img.convert("RGB")
+    img = _ensure_rgb(img, bg=bg)
     w, h = img.size
     if w <= 0 or h <= 0:
         raise ValueError(f"invalid image size {w}x{h}")
@@ -379,20 +461,18 @@ def _render_png_bytes_backends(
     aspect = svg_aspect_ratio(svg) if preserve_aspect else 1.0
     with _quiet_svg_render():
         try:
-            import resvg_py
-
             if preserve_aspect:
                 if aspect >= 1.0:
-                    png = resvg_py.svg_to_bytes(svg_string=svg, width=size)
+                    png = _resvg_to_png(svg, width=size)
                 else:
-                    png = resvg_py.svg_to_bytes(svg_string=svg, height=size)
+                    png = _resvg_to_png(svg, height=size)
             else:
-                png = resvg_py.svg_to_bytes(svg_string=svg, width=size, height=size)
+                png = _resvg_to_png(svg, width=size, height=size)
             if png:
                 if letterbox:
                     from PIL import Image
 
-                    img = Image.open(io.BytesIO(png)).convert("RGB")
+                    img = _ensure_rgb(Image.open(io.BytesIO(png)))
                     png_buf = io.BytesIO()
                     _letterbox_image(img, size).save(png_buf, format="PNG")
                     return png_buf.getvalue(), errors
@@ -404,16 +484,21 @@ def _render_png_bytes_backends(
 
             if preserve_aspect and abs(aspect - 1.0) > 1e-3:
                 if aspect >= 1.0:
-                    png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_width=size)
+                    png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_width=size, background_color="white")
                 else:
-                    png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_height=size)
+                    png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_height=size, background_color="white")
             else:
-                png = cairosvg.svg2png(bytestring=svg.encode("utf-8"), output_width=size, output_height=size)
+                png = cairosvg.svg2png(
+                    bytestring=svg.encode("utf-8"),
+                    output_width=size,
+                    output_height=size,
+                    background_color="white",
+                )
             if png:
                 if letterbox:
                     from PIL import Image
 
-                    img = Image.open(io.BytesIO(png)).convert("RGB")
+                    img = _ensure_rgb(Image.open(io.BytesIO(png)))
                     png_buf = io.BytesIO()
                     _letterbox_image(img, size).save(png_buf, format="PNG")
                     return png_buf.getvalue(), errors
@@ -433,7 +518,7 @@ def _render_png_bytes_backends(
                     if letterbox:
                         from PIL import Image
 
-                        img = Image.open(io.BytesIO(png)).convert("RGB")
+                        img = _ensure_rgb(Image.open(io.BytesIO(png)))
                         png_buf = io.BytesIO()
                         _letterbox_image(img, size).save(png_buf, format="PNG")
                         return png_buf.getvalue(), errors
