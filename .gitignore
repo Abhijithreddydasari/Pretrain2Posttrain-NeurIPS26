@@ -39,6 +39,7 @@ data/**/*.jsonl
 *.jpg
 *.jpeg
 *.svg
+!assets/**/*.png
 !data/fixtures/**/*.svg
 !eval/fixtures/**/*.svg
 !paper/figures/.gitkeep
