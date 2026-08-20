@@ -11,8 +11,7 @@ import argparse
 import logging
 import os
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +25,8 @@ from data.scripts.broad_io import (  # noqa: E402
     RejectionCounter,
     load_test_hashes,
     print_summary,
+    repo_relative,
+    resolve_asset_path,
     retry_hf,
     write_json,
 )
@@ -34,6 +35,7 @@ from structsvg_lib.broad_features import (  # noqa: E402
     dedup_by_phash,
     extract_structural_features,
     feature_bucket,
+    vfig_code_filter,
 )
 from structsvg_lib.svg_ops import extract_svg_blob, validate_svg
 
@@ -44,7 +46,13 @@ DEFAULT_TOTAL = 182_618
 MAX_SVG_CHARS = 20_000
 PHASH_NEAR_DUP = 3
 SCAN_RENDER_SIZE = 224
-_RENDER_LOCK = threading.Lock()
+
+
+def _default_workers() -> int:
+    """Process pool on Linux/Modal; single worker on Windows (svglib fallback is not MP-safe)."""
+    if os.name == "nt":
+        return 1
+    return min(8, os.cpu_count() or 4)
 
 
 def _load_dataset_stream(revision: str | None):
@@ -108,10 +116,11 @@ def _pass_a_cheap_filter(
                     elif val.sha256 in seen_sha:
                         counter.reject("exact_dup")
                     else:
-                        bucket = feature_bucket(val.normalized)
-                        if bucket == "path_soup":
-                            counter.reject("path_soup")
+                        vfig_ok, vfig_reason, vfig_m = vfig_code_filter(val.normalized)
+                        if not vfig_ok:
+                            counter.reject(vfig_reason or "vfig_filter")
                         else:
+                            bucket = feature_bucket(val.normalized)
                             assert val.sha256 is not None
                             feat_vec, feat_named = extract_structural_features(val.normalized)
                             seen_sha.add(val.sha256)
@@ -125,6 +134,7 @@ def _pass_a_cheap_filter(
                                 "difficulty": feat_named["difficulty"],
                                 "source": HF_DATASET,
                                 "normalized": val.normalized,
+                                **vfig_m,
                             }
                             for i, name in enumerate(STRUCTURAL_FEATURE_NAMES):
                                 rec[f"feat_{name}"] = float(feat_vec[i])
@@ -144,6 +154,9 @@ def _pass_a_cheap_filter(
 
 def _render_worker(task: dict) -> dict:
     """Pass B worker: single render → phash + write SVG/PNG."""
+    # ProcessPoolExecutor children may not inherit repo layout; Modal sets PYTHONPATH=/root.
+    if "/root" not in sys.path:
+        sys.path.insert(0, "/root")
     root = Path(task["root"])
     try:
         from structsvg_lib.svg_ops import perceptual_hash_from_image, render_pil
@@ -151,23 +164,22 @@ def _render_worker(task: dict) -> dict:
         normalized = task["normalized"]
         svg_path = root / task["svg_rel"]
         png_path = root / task["png_rel"]
-        with _RENDER_LOCK:
-            img = render_pil(normalized, size=task.get("render_size", SCAN_RENDER_SIZE))
-            phash = perceptual_hash_from_image(img)
-            svg_path.parent.mkdir(parents=True, exist_ok=True)
-            png_path.parent.mkdir(parents=True, exist_ok=True)
-            svg_path.write_text(normalized, encoding="utf-8")
-            img.save(png_path)
+        img = render_pil(normalized, size=task.get("render_size", SCAN_RENDER_SIZE))
+        phash = perceptual_hash_from_image(img)
+        svg_path.parent.mkdir(parents=True, exist_ok=True)
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        svg_path.write_text(normalized, encoding="utf-8")
+        img.save(png_path)
         return {
-            **{k: v for k, v in task.items() if k != "normalized"},
+            **{k: v for k, v in task.items() if k not in ("normalized", "svg_store", "png_store")},
             "phash": phash,
             "render_ok": True,
-            "svg_path": task["svg_rel"],
-            "png_path": task["png_rel"],
+            "svg_path": task["svg_store"],
+            "png_path": task["png_store"],
         }
     except Exception as e:  # noqa: BLE001
         return {
-            **{k: v for k, v in task.items() if k != "normalized"},
+            **{k: v for k, v in task.items() if k not in ("normalized", "svg_store", "png_store")},
             "phash": None,
             "render_ok": False,
             "error": str(e),
@@ -177,9 +189,7 @@ def _render_worker(task: dict) -> dict:
 def _pass_b_render(
     staging: list[dict],
     *,
-    root: Path,
-    svg_dir: Path,
-    png_dir: Path,
+    out_dir: Path,
     workers: int,
     counter: RejectionCounter,
     errors: ErrorLogger,
@@ -188,13 +198,17 @@ def _pass_b_render(
     tasks: list[dict] = []
     for rec in staging:
         sha_key = rec["sha256"][:16]
+        svg_rel = f"pool_svgs/{sha_key}.svg"
+        png_rel = f"pool_pngs/{sha_key}.png"
         tasks.append(
             {
                 **{k: v for k, v in rec.items() if k != "normalized"},
                 "normalized": rec["normalized"],
-                "root": str(root),
-                "svg_rel": str((svg_dir / f"{sha_key}.svg").relative_to(root).as_posix()),
-                "png_rel": str((png_dir / f"{sha_key}.png").relative_to(root).as_posix()),
+                "root": str(out_dir),
+                "svg_rel": svg_rel,
+                "png_rel": png_rel,
+                "svg_store": repo_relative(out_dir, svg_rel),
+                "png_store": repo_relative(out_dir, png_rel),
                 "render_size": SCAN_RENDER_SIZE,
             }
         )
@@ -213,11 +227,9 @@ def _pass_b_render(
                 errors.log("scan_b", out.get("id", "?"), out.get("sha256"), "RenderError", out.get("error", ""))
             progress.tick(kept=len(rendered), rejected=counter.counts.get("render_fail", 0))
     else:
-        logging.warning(
-            "pass B: svg render backends are not thread-safe; workers=%d uses a global lock (sequential render).",
-            workers,
-        )
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        executor_cls = ProcessPoolExecutor if os.name != "nt" else ThreadPoolExecutor
+        logging.info("pass B: rendering with %s workers=%d", executor_cls.__name__, workers)
+        with executor_cls(max_workers=workers) as pool:
             futures = {pool.submit(_render_worker, t): t for t in tasks}
             for fut in as_completed(futures):
                 out = fut.result()
@@ -253,11 +265,10 @@ def scan_pool(
         max_rows = max_rows or 5_000
 
     if workers is None:
-        workers = 1  # render backends (svglib/cairo) are not safely parallel on Windows
+        workers = _default_workers()
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_dir = out_dir.resolve()
-    root = ROOT.resolve()
+    # Do not resolve() out_dir — Modal volume mounts symlink to /__modal/volumes/...
     svg_dir = out_dir / "pool_svgs"
     png_dir = out_dir / "pool_pngs"
     svg_dir.mkdir(parents=True, exist_ok=True)
@@ -286,9 +297,7 @@ def scan_pool(
     logging.info("pass B: render + phash (%d survivors, workers=%d)...", len(staging), workers)
     rendered = _pass_b_render(
         staging,
-        root=root,
-        svg_dir=svg_dir,
-        png_dir=png_dir,
+        out_dir=out_dir,
         workers=workers,
         counter=counter,
         errors=errors,
@@ -336,7 +345,7 @@ def _write_pool_index(rows: list[dict], path: Path) -> None:
 
     slim = []
     for r in rows:
-        slim.append({k: v for k, v in r.items() if k not in ("normalized", "root", "svg_rel", "png_rel", "render_size", "render_ok", "error")})
+        slim.append({k: v for k, v in r.items() if k not in ("normalized", "root", "svg_rel", "png_rel", "svg_store", "png_store", "render_size", "render_ok", "error")})
     df = pd.DataFrame(slim)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
@@ -353,19 +362,36 @@ def structural_matrix(df) -> np.ndarray:
     return df[cols].to_numpy(dtype=np.float32)
 
 
-def resolve_pool_image(row: dict, render_size: int = 224):
-    """Load cached pool PNG or fall back to SVG render."""
+def load_pool_png(row: dict, *, out_dir: Path | None = None, render_size: int = 224):
+    """Load cached pool PNG only — never re-render SVG during embed."""
     from PIL import Image
 
+    candidates: list[Path] = []
+    if row.get("png_path"):
+        candidates.append(resolve_asset_path(row["png_path"]))
+    if out_dir is not None and row.get("sha256"):
+        candidates.append(out_dir / "pool_pngs" / f"{row['sha256'][:16]}.png")
+
+    for p in candidates:
+        if p.is_file():
+            with Image.open(p) as im:
+                im.load()
+                img = im.convert("RGB") if im.mode != "RGB" else im.copy()
+            if img.size != (render_size, render_size):
+                img = img.resize((render_size, render_size), Image.Resampling.LANCZOS)
+            return img
+    raise FileNotFoundError(f"pool PNG missing for {row.get('id', '?')} (checked {candidates})")
+
+
+def resolve_pool_image(row: dict, render_size: int = 224, *, out_dir: Path | None = None):
+    """Load cached pool PNG or fall back to SVG render (scan/visualize only)."""
     from structsvg_lib.svg_ops import render_pil
 
-    svg_path = ROOT / row["svg_path"]
-    if row.get("png_path"):
-        p = ROOT / row["png_path"]
-        if p.exists():
-            img = Image.open(p).convert("RGB")
-            if img.size == (render_size, render_size):
-                return img
+    try:
+        return load_pool_png(row, out_dir=out_dir, render_size=render_size)
+    except FileNotFoundError:
+        pass
+    svg_path = resolve_asset_path(row["svg_path"])
     return render_pil(svg_path.read_text(encoding="utf-8"), size=render_size)
 
 
@@ -377,7 +403,7 @@ def main():
     ap.add_argument("--revision", type=str, default=None)
     ap.add_argument("--test-dedup", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--workers", type=int, default=1, help="pass B render workers (default 1; backends not thread-safe)")
+    ap.add_argument("--workers", type=int, default=None, help="pass B render workers (default: 8 on Linux, 1 on Windows)")
     args = ap.parse_args()
 
     stats = scan_pool(

@@ -1,6 +1,7 @@
 """Structural features and bucketing for broad SVG-Diagrams coreset selection."""
 from __future__ import annotations
 
+import math
 import re
 from xml.etree import ElementTree as ET
 
@@ -33,6 +34,67 @@ STRUCTURAL_FEATURE_NAMES = [
     "difficulty",
 ]
 
+# VFIG (arXiv:2603.24575) SVG code filter — replaces tag-count path_soup rejection.
+VFIG_MIN_CLEAN = 0.40  # (B + K) / N
+VFIG_MAX_COMPLEX = 50  # max path + polygon count
+
+_VFIG_BASIC = frozenset({"rect", "circle", "ellipse"})
+_VFIG_CONNECTOR = frozenset({"line", "polyline"})
+_VFIG_COMPLEX = frozenset({"path", "polygon"})
+
+
+def count_vfig_elements(root: ET.Element) -> dict[str, int]:
+    """Count VFIG element groups: B (basic), K (connector), C (complex), T (text)."""
+    counts = {"B": 0, "K": 0, "C": 0, "T": 0}
+    for node in root.iter():
+        tag = _local(node.tag)
+        if tag in _VFIG_BASIC:
+            counts["B"] += 1
+        elif tag in _VFIG_CONNECTOR:
+            counts["K"] += 1
+        elif tag in _VFIG_COMPLEX:
+            counts["C"] += 1
+        elif tag == "text":
+            counts["T"] += 1
+    return counts
+
+
+def vfig_metrics(counts: dict[str, int]) -> dict[str, float]:
+    """Derived VFIG stats: N, Clean, PD, EC (log-scaled element complexity)."""
+    b, k, c, t = counts["B"], counts["K"], counts["C"], counts["T"]
+    n = b + k + c
+    clean = (b + k) / n if n > 0 else 0.0
+    return {
+        "vfig_B": float(b),
+        "vfig_K": float(k),
+        "vfig_C": float(c),
+        "vfig_T": float(t),
+        "vfig_N": float(n),
+        "vfig_clean": float(clean),
+        "vfig_pd": float(c / n if n > 0 else 0.0),
+        "vfig_ec": float(math.log1p(n + t)),
+    }
+
+
+def vfig_code_filter(svg: str) -> tuple[bool, str | None, dict[str, float]]:
+    """VFIG code filter: Clean >= 0.40 and C <= 50 (N = B+K+C > 0).
+
+    Returns (pass, rejection_reason, metrics_dict).
+    """
+    root, err = parse_svg(svg)
+    if err or root is None:
+        return False, "vfig_parse", {}
+    metrics = vfig_metrics(count_vfig_elements(root))
+    n = int(metrics["vfig_N"])
+    c = int(metrics["vfig_C"])
+    if n == 0:
+        return False, "vfig_no_geometry", metrics
+    if metrics["vfig_clean"] < VFIG_MIN_CLEAN:
+        return False, "vfig_low_clean", metrics
+    if c > VFIG_MAX_COMPLEX:
+        return False, "vfig_too_many_complex", metrics
+    return True, None, metrics
+
 
 def feature_bucket(svg: str) -> str:
     """Crude structural bucket for stratification / reporting."""
@@ -45,8 +107,6 @@ def feature_bucket(svg: str) -> str:
         return "workflow_like"
     if n_line >= 3 and n_text <= 3 and n_path <= 2:
         return "geometry_like"
-    if n_path >= 5 and n_text == 0:
-        return "path_soup"
     if n_text >= 1:
         return "labeled"
     return "other"
