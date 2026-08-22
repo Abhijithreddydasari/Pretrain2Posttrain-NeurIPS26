@@ -48,7 +48,7 @@ flowchart TB
 
 
 
-**VFIG code filter** (He et al. 2026): drop SVGs with semantic cleanliness (B+K)/N < 0.40 or complex shapes C > 50 where: B=rect/circle/ellipse, K=line/polyline, C=path/polygon.
+**VFIG code filter** (He et al. 2026): drop SVGs with semantic cleanliness (B+K)/N < 0.40 or complex shapes C > 50 where: B= no. of rect/circle/ellipse, K=no. of line/polyline, C=no. of path/polygon.
 
 ### Full run stats (locked run, seed 42)
 
@@ -73,8 +73,6 @@ Analysis plots + auto summary:
 python -m data.scripts.broad_analyze --out data/processed/svg_diagrams
 # → figures/analysis/*.png, RUN_SUMMARY.md
 ```
-
-
 
 ### Commands
 
