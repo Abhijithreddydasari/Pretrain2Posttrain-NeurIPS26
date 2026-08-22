@@ -46,16 +46,20 @@ flowchart TB
   A --> B --> C --> POOL --> EMB --> SEL --> MAT
 ```
 
-**VFIG code filter** (He et al. 2026): drop SVGs with semantic cleanliness \((B+K)/N < 0.40\) or complex shapes \(C > 50\) where \(B\)=rect/circle/ellipse, \(K\)=line/polyline, \(C\)=path/polygon.
+
+
+**VFIG code filter** (He et al. 2026): drop SVGs with semantic cleanliness (B+K)/N < 0.40 or complex shapes C > 50 where: B=rect/circle/ellipse, K=line/polyline, C=path/polygon.
 
 ### Full run stats (locked run, seed 42)
 
-| Stage | Count |
-|-------|------:|
-| Scanned | 182,144 |
-| Pass A survivors | 44,807 |
+
+| Stage                    | Count      |
+| ------------------------ | ---------- |
+| Scanned                  | 182,144    |
+| Pass A survivors         | 44,807     |
 | Pool (after phash dedup) | **30,011** |
-| Train coreset | **2,000** |
+| Train coreset            | **2,000**  |
+
 
 Top rejections: `vfig_low_clean` 105,438 · `validate` 28,950 · `phash_near_dup` 14,796.
 
@@ -69,6 +73,8 @@ Analysis plots + auto summary:
 python -m data.scripts.broad_analyze --out data/processed/svg_diagrams
 # → figures/analysis/*.png, RUN_SUMMARY.md
 ```
+
+
 
 ### Commands
 
@@ -111,10 +117,12 @@ Set `BROAD_TQDM=0` to disable progress bars (e.g. in CI).
 
 ## Conditions
 
-| Condition | Train source | Role |
-|-----------|--------------|------|
-| **Broad 2k** | Coreset from `starvector/svg-diagrams` train pool | Heterogeneous real diagram SVG syntax |
-| **StructSVG 2k** | `generate_structsvg.py` (workflows + geometry) | Structure-designed data with gold scene graphs |
+
+| Condition        | Train source                                      | Role                                           |
+| ---------------- | ------------------------------------------------- | ---------------------------------------------- |
+| **Broad 2k**     | Coreset from `starvector/svg-diagrams` train pool | Heterogeneous real diagram SVG syntax          |
+| **StructSVG 2k** | `generate_structsvg.py` (workflows + geometry)    | Structure-designed data with gold scene graphs |
+
 
 **External eval only (never train):** FlowGen, SVG-Diagrams test (~474), **VFIG-Bench** (see below).
 
@@ -124,12 +132,14 @@ Do not commit raw HF dumps, large PNG grids, or model outputs.
 
 [VFIG](https://arxiv.org/abs/2603.24575) released **VFIG-Data** (~66k image–SVG pairs on HF `QijiaHe/VFIG-Data`) and **VFIG-Bench** (held-out scientific figures). We do **not** fold VFIG into the locked Broad 2k condition for v0 — that would change provenance and break the matched Broad vs StructSVG comparison mid-pipeline.
 
-| Use | v0 (Aug 29) | Later |
-|-----|-------------|-------|
-| **VFIG-Bench eval** | Secondary external bench: score base + SFT checkpoints (validity, component metrics, optional VLM-judge) | Primary comparability to VFIG paper |
-| **VFIG-Data as train** | No — keep Broad = StarVector pool | Optional 2k coreset ablation (“VFIG-shaped broad”) or curriculum stage |
-| **VFIG-Data-Shapes-and-Arrows** (~6.5k) | No | Primitive-heavy third condition (closest to VFIG stage-1 curriculum) |
-| **Cross-dedup** | If sampling VFIG later, dedup vs Broad + SVG-Diagrams test hashes | Same `build_test_hashes` + phash pipeline |
+
+| Use                                     | v0 (Aug 29)                                                                                              | Later                                                                  |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **VFIG-Bench eval**                     | Secondary external bench: score base + SFT checkpoints (validity, component metrics, optional VLM-judge) | Primary comparability to VFIG paper                                    |
+| **VFIG-Data as train**                  | No — keep Broad = StarVector pool                                                                        | Optional 2k coreset ablation (“VFIG-shaped broad”) or curriculum stage |
+| **VFIG-Data-Shapes-and-Arrows** (~6.5k) | No                                                                                                       | Primitive-heavy third condition (closest to VFIG stage-1 curriculum)   |
+| **Cross-dedup**                         | If sampling VFIG later, dedup vs Broad + SVG-Diagrams test hashes                                        | Same `build_test_hashes` + phash pipeline                              |
+
 
 **Scan filter:** we adopt VFIG’s code heuristic (Clean ≥ 0.40, C ≤ 50) instead of the old tag-count `path_soup` rule.
 
