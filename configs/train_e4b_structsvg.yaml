@@ -2,7 +2,7 @@ model_id: google/gemma-4-E4B
 revision: main
 trust_remote_code: true
 torch_dtype: bfloat16
-load_in_4bit: true
+load_in_4bit: false
 attn_implementation: sdpa
 use_base_not_it: true
 prompt_template: |
@@ -27,7 +27,7 @@ train:
   # overridden at runtime from checkpoints_pct × total steps
   save_steps: 50
   max_seq_length: 4096
-  optim: paged_adamw_8bit
+  optim: adamw_torch
   bf16: true
   remove_unused_columns: false
   report_to: none

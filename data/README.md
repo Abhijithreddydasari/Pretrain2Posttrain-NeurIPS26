@@ -10,7 +10,7 @@ data/
   processed/        manifests + rendered pairs (gitignored)
     broad/          pilot / scratch (Modal volume mirror)
     svg_diagrams/   full broad 2k coreset (Aug 2026)
-    structsvg/      controlled 2k (workflows + geometry)
+    vfig_bench/     VFIG-Bench eval manifests (planned)
   splits/           locked split IDs (small JSON committed when ready)
   fixtures/         tiny checked-in examples for tests
 ```
@@ -118,11 +118,11 @@ Set `BROAD_TQDM=0` to disable progress bars (e.g. in CI).
 
 | Condition        | Train source                                      | Role                                           |
 | ---------------- | ------------------------------------------------- | ---------------------------------------------- |
-| **Broad 2k**     | Coreset from `starvector/svg-diagrams` train pool | Heterogeneous real diagram SVG syntax          |
-| **StructSVG 2k** | `generate_structsvg.py` (workflows + geometry)    | Structure-designed data with gold scene graphs |
+| **Broad 2k**     | Coreset from `starvector/svg-diagrams` train pool | v0 SFT — heterogeneous real diagram SVG syntax |
+| **VFIG-Data 2k** | Optional 2nd-stage coreset from `QijiaHe/VFIG-Data` | Follow-up ablation only; dedup vs Broad + VFIG-Bench 400 |
 
 
-**External eval only (never train):** FlowGen, SVG-Diagrams test (~474), **VFIG-Bench** (see below).
+**Primary eval (no train):** VFIG-Bench 400 + VFIG-Bench-OOD 198, SVG-Diagrams test (~474), controls.
 
 Do not commit raw HF dumps, large PNG grids, or model outputs.
 
@@ -133,14 +133,11 @@ Do not commit raw HF dumps, large PNG grids, or model outputs.
 
 | Use                                     | v0 (Aug 29)                                                                                              | Later                                                                  |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **VFIG-Bench eval**                     | Secondary external bench: score base + SFT checkpoints (validity, component metrics, optional VLM-judge) | Primary comparability to VFIG paper                                    |
-| **VFIG-Data as train**                  | No — keep Broad = StarVector pool                                                                        | Optional 2k coreset ablation (“VFIG-shaped broad”) or curriculum stage |
-| **VFIG-Data-Shapes-and-Arrows** (~6.5k) | No                                                                                                       | Primitive-heavy third condition (closest to VFIG stage-1 curriculum)   |
-| **Cross-dedup**                         | If sampling VFIG later, dedup vs Broad + SVG-Diagrams test hashes                                        | Same `build_test_hashes` + phash pipeline                              |
+| **VFIG-Bench eval**                     | **Primary** — score base + broad-SFT checkpoints on 400 ID + 198 OOD | Workshop comparability to VFIG paper |
+| **VFIG-Data as 2nd-stage train**        | Optional after broad curves — 2k coreset, exclude VFIG-Bench IDs       | Ablation: does structure data move structure metrics? |
+| **VFIG-Data-Shapes-and-Arrows** (~6.5k) | Optional curriculum slice for 2nd stage                               | Closest to VFIG stage-1 primitives |
+| **Cross-dedup**                         | Required before any VFIG train use                                    | Same phash + test-hash pipeline as broad |
 
-
-**Scan filter:** we adopt VFIG’s code heuristic (Clean ≥ 0.40, C ≤ 50) instead of the old tag-count `path_soup` rule.
-
-**Recommended v0 path:** finish StarVector broad coreset → train Gemma → eval on StructSVG (primary) + VFIG-Bench subset (secondary, no training on VFIG-Data).
+**Recommended v0 path:** broad 2k SFT → checkpoint eval on **VFIG-Bench** (+ OOD) → optional 2nd-stage VFIG SFT ablation.
 
 Adapter script (planned): `data/scripts/vfig_to_manifest.py` — render figures, normalize to `notes/canonical_svg.md`, emit eval manifest only.
