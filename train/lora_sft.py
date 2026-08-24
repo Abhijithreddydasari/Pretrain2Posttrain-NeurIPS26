@@ -16,6 +16,10 @@ from train.checkpoint_utils import CheckpointPctCallback, SampleProgressCallback
 from train.data_utils import PROMPT, build_train_example, load_manifest, resolve_image, resolve_svg
 
 
+def _status(msg: str) -> None:
+    print(f"[train] {msg}", flush=True)
+
+
 def load_config(path: Path) -> dict:
     with path.open(encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -75,7 +79,9 @@ def main():
 
     man = _resolve_manifest(cfg)
     rows = load_manifest(man, cfg["data"].get("max_samples"))
-    print(f"loaded {len(rows)} rows from {man}")
+    _status(f"loaded {len(rows)} rows from {man}")
+
+    _status("validating sample preview (first 8 rows)...")
 
     samples_meta = []
     for r in rows[: min(8, len(rows))]:
@@ -92,11 +98,12 @@ def main():
     (out_meta / "data_preview.json").write_text(json.dumps(samples_meta, indent=2), encoding="utf-8")
 
     if args.dry_run:
-        print("dry-run OK")
+        _status("dry-run OK")
         return
 
     # UTF-8 required for TRL chat templates on Windows
     os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
     os.environ.setdefault("TQDM_DISABLE", "1")
@@ -111,6 +118,7 @@ def main():
     if cfg.get("use_base_not_it") and model_id.endswith("-it"):
         raise ValueError("Refusing instruct checkpoint while use_base_not_it=true")
 
+    _status(f"loading model {model_id} (bf16={not cfg.get('load_in_4bit', False)})...")
     processor, model, loader = load_vlm(
         model_id,
         load_in_4bit=bool(cfg.get("load_in_4bit")),
@@ -118,10 +126,13 @@ def main():
         trust_remote_code=cfg.get("trust_remote_code", True),
         attn_implementation=cfg.get("attn_implementation", "sdpa"),
     )
-    print(f"loaded {model_id} via {loader}")
+    _status(f"model loaded via {loader}")
 
     if cfg.get("load_in_4bit"):
+        _status("preparing model for k-bit training...")
         model = prepare_model_for_kbit_training(model)
+
+    _status("applying LoRA adapters...")
 
     lcfg = cfg["lora"]
     peft_cfg = LoraConfig(
@@ -136,26 +147,33 @@ def main():
     model.print_trainable_parameters()
 
     prompt = cfg.get("prompt_template", PROMPT).strip()
+    n_rows = len(rows)
     train_records = None
     if args.verify_loss_mask:
+        _status("building 8 examples for loss-mask gate...")
         train_records = [build_train_example(r, prompt=prompt) for r in rows[:8]]
     else:
 
         def _examples():
-            for r in rows:
+            for i, r in enumerate(rows):
+                if i == 0 or (i + 1) % 100 == 0 or i + 1 == n_rows:
+                    _status(f"materializing examples {i + 1}/{n_rows}")
                 yield build_train_example(r, prompt=prompt)
 
+        _status(f"building dataset ({n_rows} image→SVG examples)...")
         train_dataset = Dataset.from_generator(_examples)
+        _status("dataset object ready (rows materialize on first train pass)")
 
     tcfg = cfg["train"]
     max_length = tcfg.get("max_seq_length", 4096)
 
     if args.verify_loss_mask:
+        _status("verifying loss mask on one batch...")
         stats = verify_loss_mask(processor, train_records, max_length=max_length)
         _print_loss_mask_stats(stats)
         if stats["supervised_tokens"] <= 0:
             raise SystemExit("loss mask gate FAILED: no supervised tokens")
-        print("loss mask gate OK")
+        _status("loss mask gate OK")
         return
 
     total_steps = estimate_total_steps(
@@ -166,7 +184,8 @@ def main():
     )
     checkpoints_pct = cfg.get("checkpoints_pct", [])
     step_map = pct_to_steps(checkpoints_pct, total_steps)
-    print(f"estimated total_steps={total_steps} checkpoint map={step_map}")
+    _status(f"estimated total_steps={total_steps} epochs={tcfg.get('num_train_epochs', 1)}")
+    _status(f"checkpoint schedule: {step_map}")
 
     sft_args = SFTConfig(
         output_dir=tcfg["output_dir"],
@@ -192,7 +211,7 @@ def main():
     )
 
     n_samples = len(train_dataset)
-    progress_interval = max(1, n_samples // 20)  # ~20 status lines per epoch on 2k data
+    progress_interval = max(1, min(100, n_samples // 20))  # every 100 ex, ~20 lines/epoch on 2k
     ckpt_cb = CheckpointPctCallback(
         checkpoints_pct=checkpoints_pct,
         total_steps=total_steps,
@@ -223,15 +242,17 @@ def main():
     }
     (Path(tcfg["output_dir"]) / "checkpoints_pct.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
+    _status("starting trainer.train() — first step may take 1–3 min (compile)...")
     trainer.train()
     final_dir = Path(tcfg["output_dir"]) / "final"
     trainer.save_model(str(final_dir))
-    print(f"training complete; final adapter at {final_dir}")
+    _status(f"training complete; final adapter at {final_dir}")
     import torch
 
     if torch.cuda.is_available():
         peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
         print(f"PEAK_VRAM_GB={peak_gb:.2f}", flush=True)
+        _status(f"peak VRAM {peak_gb:.2f} GB")
 
 
 if __name__ == "__main__":

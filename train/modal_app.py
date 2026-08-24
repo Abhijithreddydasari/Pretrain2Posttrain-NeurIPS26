@@ -17,6 +17,7 @@ DATA_ROOT = "/root/data"
 _TRAIN_ENV = {
     "PYTHONPATH": "/root",
     "PYTHONUTF8": "1",
+    "PYTHONUNBUFFERED": "1",
     "DATA_ROOT": DATA_ROOT,
     "HF_HOME": "/vol/hf",
     "HF_HUB_CACHE": "/vol/hf",
@@ -32,12 +33,16 @@ def _is_train_status_line(line: str) -> bool:
     s = line.strip()
     if not s:
         return False
-    if s.startswith("Loading weights:") or "Loading weights:" in s:
+    # Drop HF weight-shard progress bars only (keep our [train] milestones).
+    if "Loading weights:" in s and "[train]" not in s:
         return False
-    if s.startswith("\r") or "|" in s and "%|" in s:
+    if s.startswith("\r"):
         return False
+    if "%|" in s and "[train]" not in s:
+        return False
+    if "[train]" in s:
+        return True
     keep_prefixes = (
-        "[train]",
         "loaded ",
         "dry-run",
         "loss mask",
@@ -48,6 +53,7 @@ def _is_train_status_line(line: str) -> bool:
         "seq_len=",
         "supervised_preview",
         "supervised_tokens=",
+        "Generating train split",
     )
     if any(s.startswith(p) for p in keep_prefixes):
         return True
@@ -167,7 +173,7 @@ def _run_train_subprocess(
     runtime_cfg = Path("/tmp/runtime_train.yaml")
     runtime_cfg.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
-    cmd = [sys.executable, "-m", "train.lora_sft", "--config", str(runtime_cfg)]
+    cmd = [sys.executable, "-u", "-m", "train.lora_sft", "--config", str(runtime_cfg)]
     if dry_run:
         cmd.append("--dry-run")
     if verify_loss_mask:

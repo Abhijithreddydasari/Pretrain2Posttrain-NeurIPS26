@@ -71,12 +71,14 @@ class CheckpointPctCallback(TrainerCallback):
         }
         self.manifest.append(entry)
         self._write_manifest()
+        print(f"[train] saved checkpoint {pct}% at step {step} → {ckpt_dir}", flush=True)
 
     def _write_manifest(self) -> None:
         path = self.output_dir / "checkpoint_manifest.json"
         path.write_text(json.dumps({"checkpoints": self.manifest}, indent=2), encoding="utf-8")
 
     def on_train_begin(self, args, state, control, **kwargs):
+        print("[train] train loop starting (saving checkpoint 0% if scheduled)...", flush=True)
         if 0 in self.step_map:
             self._save(0, 0, tag="base_plus_init_lora")
 
@@ -104,6 +106,9 @@ class SampleProgressCallback(TrainerCallback):
         self._next_milestone = self.interval
 
     def on_step_end(self, args, state, control, **kwargs):
+        if int(state.global_step) == 1:
+            loss = state.log_history[-1].get("loss") if state.log_history else None
+            print(f"[train] step 1 complete loss={loss}", flush=True)
         effective = max(
             1,
             args.per_device_train_batch_size * args.gradient_accumulation_steps,
