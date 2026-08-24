@@ -56,7 +56,7 @@ Modal secret: `huggingface-secret` with `HF_TOKEN`. Volumes: HF cache, `structsv
 Training entrypoint: **`train/modal_app.py`** (not `data/scripts/modal_broad_app.py`, which is the data pipeline).
 
 **GPU:** **A100-80GB** for train/probe. Smoke stays on L4 (cheap load test).  
-**Batch:** 3×accum 3 (effective 9, ~64 GB VRAM peak). Dataset cached in host RAM once (~5–6 GiB decoded).
+**Batch:** 4×2 + grad_ckpt (effective 8). Stress probe: ~25.5 GB, ~21 s/step, ~4.3 h / ~$11 on A100-80GB.
 
 **Metrics saved during train** (under `outputs/e4b_broad/` → Modal `/vol/out/e4b_broad/`):
 - `train_log.jsonl` — streaming loss/grad_norm/lr every 10 steps

@@ -93,22 +93,6 @@ PROMPT = (
 )
 
 
-def build_messages(image: Image.Image, svg: str, prompt: str = PROMPT) -> list[dict]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image},
-                {"type": "text", "text": prompt},
-            ],
-        },
-        {
-            "role": "assistant",
-            "content": [{"type": "text", "text": svg}],
-        },
-    ]
-
-
 def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
     """Prompt-completion record for TRL VLM SFT (completion_only_loss masks prompt)."""
     img = resolve_image(row)
@@ -130,6 +114,11 @@ def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
     }
 
 
+def longest_rows(rows: list[dict], n: int) -> list[dict]:
+    """Return n rows with longest SVG text (worst-case VRAM for probe)."""
+    return sorted(rows, key=lambda r: len(resolve_svg(r)), reverse=True)[:n]
+
+
 def materialize_train_examples(
     rows: list[dict],
     *,
@@ -141,15 +130,15 @@ def materialize_train_examples(
     n = len(rows)
     out: list[dict] = []
     svg_chars = 0
+    img_bytes = 0
     for i, row in enumerate(rows):
         if log_fn and (i == 0 or (i + 1) % log_every == 0 or i + 1 == n):
             log_fn(f"caching examples {i + 1}/{n} (disk → RAM, once per run)")
         ex = build_train_example(row, prompt=prompt)
         svg_chars += len(ex["completion"][0]["content"][0]["text"])
+        img_bytes += len(ex["images"][0].tobytes())
         out.append(ex)
     if log_fn and n:
-        # Decoded PIL RGB ~ width×height×3; PNGs are 960×960 letterboxed in this pipeline.
-        img_bytes = sum(len(img.tobytes()) for ex in out for img in ex["images"])
         ram_mb = (svg_chars + img_bytes) / (1024 * 1024)
         log_fn(
             f"RAM cache ~{ram_mb:.0f} MiB ({n} rows: {svg_chars / 1024:.0f} KiB SVG text + "

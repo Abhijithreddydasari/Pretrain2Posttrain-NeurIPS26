@@ -19,14 +19,14 @@ lora:
 train:
   output_dir: outputs/e4b_broad
   num_train_epochs: 3
-  per_device_train_batch_size: 3
-  gradient_accumulation_steps: 3  # effective batch 9; probe OK on A100-80GB (~64 GB peak VRAM)
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2  # effective batch 8; stress probe: 25.5GB, ~20.6s/step, ~4.3h
   learning_rate: 1.0e-4
   logging_steps: 10
   max_seq_length: 4096
   optim: adamw_torch
   bf16: true
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   dataloader_pin_memory: true
   dataloader_num_workers: 0  # must stay 0: model on CUDA before DataLoader; forked workers crash
   remove_unused_columns: false

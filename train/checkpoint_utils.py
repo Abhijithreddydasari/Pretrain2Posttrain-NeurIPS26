@@ -35,6 +35,94 @@ def pct_to_steps(checkpoints_pct: list[int | float], total_steps: int) -> dict[i
     return out
 
 
+class StepTimingCallback(TrainerCallback):
+    """Log optimizer-step wall time for probe / runtime estimates."""
+
+    def __init__(self) -> None:
+        self._t0: float | None = None
+        self.step_secs: list[float] = []
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        import time
+
+        self._t0 = time.perf_counter()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        import time
+
+        if self._t0 is None:
+            return
+        dt = time.perf_counter() - self._t0
+        self.step_secs.append(dt)
+        step = int(state.global_step)
+        if step <= 3:
+            print(f"STEP_SEC step={step} sec={dt:.1f}", flush=True)
+        self._t0 = None
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if not self.step_secs:
+            return
+        # Step 1 includes CUDA compile/warmup; average step 2+ when available.
+        steady = self.step_secs[1:] if len(self.step_secs) > 1 else self.step_secs
+        avg = sum(steady) / len(steady)
+        print(f"STEP_SEC_AVG={avg:.2f}", flush=True)
+
+
+class VramPeakCallback(TrainerCallback):
+    """Log honest GPU memory peaks (alloc + reserved) during early steps and at end."""
+
+    def __init__(self, *, log_first_n_steps: int = 3):
+        self.log_first_n_steps = log_first_n_steps
+        self.peak_alloc_gb = 0.0
+        self.peak_reserved_gb = 0.0
+
+    def _snapshot(self, step: int | None = None) -> None:
+        try:
+            import torch
+        except ImportError:
+            return
+        if not torch.cuda.is_available():
+            return
+        alloc = torch.cuda.max_memory_allocated() / (1024**3)
+        reserved = torch.cuda.max_memory_reserved() / (1024**3)
+        self.peak_alloc_gb = max(self.peak_alloc_gb, alloc)
+        self.peak_reserved_gb = max(self.peak_reserved_gb, reserved)
+        if step is not None and step <= self.log_first_n_steps:
+            print(
+                f"[train] vram after step {step}: peak_alloc={alloc:.2f}GB "
+                f"peak_reserved={reserved:.2f}GB",
+                flush=True,
+            )
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        try:
+            import torch
+        except ImportError:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            print("[train] vram peak counters reset (measuring from train loop only)", flush=True)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self._snapshot(int(state.global_step))
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self._snapshot(None)
+        print(
+            f"PEAK_VRAM_ALLOC_GB={self.peak_alloc_gb:.2f}",
+            flush=True,
+        )
+        print(
+            f"PEAK_VRAM_RESERVED_GB={self.peak_reserved_gb:.2f}",
+            flush=True,
+        )
+        print(
+            f"[train] peak VRAM train loop: alloc={self.peak_alloc_gb:.2f}GB "
+            f"reserved={self.peak_reserved_gb:.2f}GB",
+            flush=True,
+        )
+
+
 class TrainMetricsCallback(TrainerCallback):
     """Append training metrics to disk for loss-curve plotting."""
 
@@ -81,6 +169,7 @@ class CheckpointPctCallback(TrainerCallback):
         self.pending = {step: pct for pct, step in self.step_map.items() if pct > 0 and step > 0}
         self.manifest: list[dict] = []
         self.trainer = trainer
+        self._pending_zero = False
 
     def bind_trainer(self, trainer) -> None:
         self.trainer = trainer
@@ -100,19 +189,27 @@ class CheckpointPctCallback(TrainerCallback):
         }
         self.manifest.append(entry)
         self._write_manifest()
-        print(f"[train] saved checkpoint {pct}% at step {step} → {ckpt_dir}", flush=True)
+        print(f"[train] saved checkpoint {pct}% at global_step {step} → {ckpt_dir}", flush=True)
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _write_manifest(self) -> None:
         path = self.output_dir / "checkpoint_manifest.json"
         path.write_text(json.dumps({"checkpoints": self.manifest}, indent=2), encoding="utf-8")
 
     def on_train_begin(self, args, state, control, **kwargs):
-        print("[train] train loop starting (saving checkpoint 0% if scheduled)...", flush=True)
-        if 0 in self.step_map:
-            self._save(0, 0, tag="base_plus_init_lora")
+        self._pending_zero = 0 in self.step_map
 
     def on_step_end(self, args, state, control, **kwargs):
         step = int(state.global_step)
+        if getattr(self, "_pending_zero", False) and step == 1:
+            self._save(0, 0, tag="base_plus_init_lora")
+            self._pending_zero = False
         if step in self.pending:
             pct = self.pending.pop(step)
             self._save(pct, step, tag="scheduled")

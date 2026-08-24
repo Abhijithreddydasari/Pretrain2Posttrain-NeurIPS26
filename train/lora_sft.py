@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,9 @@ sys.path.insert(0, str(ROOT))
 from train.checkpoint_utils import (
     CheckpointPctCallback,
     SampleProgressCallback,
+    StepTimingCallback,
     TrainMetricsCallback,
+    VramPeakCallback,
     estimate_total_steps,
     pct_to_steps,
 )
@@ -85,8 +88,6 @@ def _setup_train_env() -> None:
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
     os.environ.setdefault("TQDM_DISABLE", "1")
-    import torch
-
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -180,8 +181,6 @@ def main():
     max_length = tcfg.get("max_seq_length", 4096)
     grad_ckpt = bool(tcfg.get("gradient_checkpointing", True))
     num_workers = int(tcfg.get("dataloader_num_workers", 0))
-    import torch
-
     if torch.cuda.is_available() and num_workers > 0:
         _status("forcing dataloader_num_workers=0 (CUDA init before DataLoader; forked workers crash)")
         num_workers = 0
@@ -250,13 +249,16 @@ def main():
         num_epochs=float(tcfg.get("num_train_epochs", 1)),
         interval=progress_interval,
     )
+    callbacks: list = [ckpt_cb, metrics_cb, progress_cb]
+    if args.max_steps is not None:
+        callbacks.extend([VramPeakCallback(log_first_n_steps=3), StepTimingCallback()])
 
     trainer = SFTTrainer(
         model=model,
         args=sft_args,
         train_dataset=train_dataset,
         processing_class=processor,
-        callbacks=[ckpt_cb, metrics_cb, progress_cb],
+        callbacks=callbacks,
     )
     ckpt_cb.bind_trainer(trainer)
     metrics_cb.bind_trainer(trainer)
@@ -277,16 +279,12 @@ def main():
     _status(f"metrics → {out_dir}/train_log.jsonl (streaming) + train_log.json (final)")
 
     _status("starting trainer.train() — first step may take 1–2 min (cuda warmup)...")
+    if 0 in step_map:
+        _status("checkpoint 0% will save after step 1 (avoids pre-step VRAM spike)")
     trainer.train()
     final_dir = Path(tcfg["output_dir"]) / "final"
     trainer.save_model(str(final_dir))
     _status(f"training complete; final adapter at {final_dir}")
-    import torch
-
-    if torch.cuda.is_available():
-        peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
-        print(f"PEAK_VRAM_GB={peak_gb:.2f}", flush=True)
-        _status(f"peak VRAM {peak_gb:.2f} GB")
 
 
 if __name__ == "__main__":

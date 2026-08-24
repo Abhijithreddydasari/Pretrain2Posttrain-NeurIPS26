@@ -8,7 +8,6 @@ app = modal.App("structsvg-sft")
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 vol_hf = modal.Volume.from_name("structsvg-hf-cache", create_if_missing=True)
-vol_data = modal.Volume.from_name("structsvg-data", create_if_missing=True)
 vol_out = modal.Volume.from_name("structsvg-outputs", create_if_missing=True)
 
 VOLUME_MOUNTS = {"/vol/hf": vol_hf, "/vol/out": vol_out}
@@ -41,7 +40,7 @@ def _is_train_status_line(line: str) -> bool:
         return False
     if "%|" in s and "[train]" not in s:
         return False
-    if "[train]" in s:
+    if "[train]" in s or s.startswith("[probe]"):
         return True
     keep_prefixes = (
         "loaded ",
@@ -50,7 +49,9 @@ def _is_train_status_line(line: str) -> bool:
         "estimated total_steps",
         "training complete",
         "trainable params",
-        "PEAK_VRAM_GB",
+        "PEAK_VRAM_ALLOC_GB",
+        "PEAK_VRAM_RESERVED_GB",
+        "STEP_SEC",
         "seq_len=",
         "supervised_preview",
         "supervised_tokens=",
@@ -86,7 +87,12 @@ def _print_task_result(result: dict) -> None:
         "batch_config",
         "per_device_train_batch_size",
         "gradient_accumulation_steps",
-        "config_note",
+        "gradient_checkpointing",
+        "step_sec_avg",
+        "est_hours_2k",
+        "est_cost_usd_2k",
+        "total_steps_2k",
+        "benchmarks",
         "loader",
         "precision",
         "manifest",
@@ -170,6 +176,20 @@ def _resolve_train_config(cfg: dict, *, manifest_override: str | None = None) ->
                 cfg.setdefault("data", {})["manifest"] = str(cand)
                 break
     return cfg
+
+
+def _parse_probe_metrics(lines: list[str]) -> dict:
+    import re
+
+    peak = peak_reserved = step_avg = None
+    for line in lines:
+        if m := re.search(r"PEAK_VRAM_ALLOC_GB=([0-9.]+)", line):
+            peak = float(m.group(1))
+        if m := re.search(r"PEAK_VRAM_RESERVED_GB=([0-9.]+)", line):
+            peak_reserved = float(m.group(1))
+        if m := re.search(r"STEP_SEC_AVG=([0-9.]+)", line):
+            step_avg = float(m.group(1))
+    return {"peak_vram_gb": peak, "peak_vram_reserved_gb": peak_reserved, "step_sec_avg": step_avg}
 
 
 def _run_train_subprocess(
@@ -322,69 +342,127 @@ def smoke_e4b(*, bf16: bool = True):
     secrets=[hf_secret],
     volumes=VOLUME_MOUNTS,
 )
-def probe_train(max_samples: int = 8, max_steps: int = 2):
-    """2-step probe on A100-80GB; tries batch ladder until one fits, reports peak VRAM."""
+def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int = 2000):
+    """Stress probe: 4×2 → 3×3 → 2×4 → 1×8 (all grad_ckpt); VRAM + step timing."""
     import copy
-    import re
+    import json
     import sys
     from pathlib import Path
 
     import yaml
 
     sys.path.insert(0, "/root")
+    from train.checkpoint_utils import estimate_total_steps
+    from train.data_utils import load_manifest, longest_rows, resolve_svg
+
     cfg_path = Path("/root/configs/train_e4b_broad.yaml")
     base_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    num_epochs = float(base_cfg["train"].get("num_train_epochs", 3))
     base_cfg = _resolve_train_config(base_cfg)
-    base_cfg.setdefault("data", {})["max_samples"] = max_samples
+    man = Path(base_cfg["data"]["manifest"])
+    all_rows = load_manifest(man, base_cfg["data"].get("max_samples"))
+    stress_rows = longest_rows(all_rows, max_samples)
+    top_len = len(resolve_svg(stress_rows[0])) if stress_rows else 0
+    print(f"[probe] stress set: {len(stress_rows)} longest SVGs (max svg chars={top_len})", flush=True)
+
+    stress_manifest = Path("/tmp/probe_stress_manifest.jsonl")
+    stress_manifest.write_text("\n".join(json.dumps(r) for r in stress_rows) + "\n", encoding="utf-8")
+    base_cfg["data"]["manifest"] = str(stress_manifest)
+    base_cfg["data"]["max_samples"] = len(stress_rows)
     base_cfg["train"]["logging_steps"] = 1
 
-    # Prefer larger micro-batches (same or near effective batch); fall back on OOM.
     candidates = [
-        (4, 2, "batch4_accum2 effective=8"),
-        (3, 3, "batch3_accum3 effective=9"),
-        (2, 4, "batch2_accum4 effective=8"),
+        (4, 2, "4×2+grad_ckpt eff=8"),
+        (3, 3, "3×3+grad_ckpt eff=9"),
+        (2, 4, "2×4+grad_ckpt eff=8"),
+        (1, 8, "1×8+grad_ckpt eff=8"),
     ]
-
-    def _is_oom(res: dict) -> bool:
-        blob = (res.get("error") or "") + "\n".join(res.get("error_tail") or [])
-        return "OutOfMemoryError" in blob or "CUDA out of memory" in blob
-
+    modal_hr = 2.50
+    benchmarks: list[dict] = []
+    recommended: dict | None = None
     last: dict = {"ok": False, "error": "no candidates tried"}
+
     for batch_size, grad_accum, label in candidates:
         cfg = copy.deepcopy(base_cfg)
-        cfg["train"]["per_device_train_batch_size"] = batch_size
-        cfg["train"]["gradient_accumulation_steps"] = grad_accum
-        cfg["train"]["output_dir"] = f"/vol/out/probe_train_b{batch_size}a{grad_accum}"
+        cfg["train"].update(
+            {
+                "per_device_train_batch_size": batch_size,
+                "gradient_accumulation_steps": grad_accum,
+                "gradient_checkpointing": True,
+                "output_dir": f"/vol/out/probe_train_b{batch_size}a{grad_accum}_gc",
+            }
+        )
         print(f"[probe] trying {label} on A100-80GB...", flush=True)
         result = _run_train_subprocess(cfg, max_steps=max_steps)
-        peak = None
-        for line in (result.get("status_tail") or []) + (result.get("error_tail") or []):
-            m = re.search(r"PEAK_VRAM_GB=([0-9.]+)", line)
-            if m:
-                peak = float(m.group(1))
+        metrics = _parse_probe_metrics((result.get("status_tail") or []) + (result.get("error_tail") or []))
+        peak = metrics["peak_vram_gb"]
+        step_avg = metrics["step_sec_avg"]
+        total_steps = estimate_total_steps(
+            n_train_samples,
+            num_train_epochs=num_epochs,
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=grad_accum,
+        )
+        est_hours = (total_steps * step_avg / 3600) if (step_avg and result.get("ok")) else None
+        est_cost = (est_hours * modal_hr) if est_hours else None
+        entry = {
+            "label": label,
+            "ok": bool(result.get("ok")),
+            "batch": batch_size,
+            "accum": grad_accum,
+            "effective_batch": batch_size * grad_accum,
+            "total_steps": total_steps,
+            **metrics,
+            "est_hours_2k": round(est_hours, 2) if est_hours else None,
+            "est_cost_usd_2k": round(est_cost, 2) if est_cost else None,
+        }
+        benchmarks.append(entry)
+        print(
+            f"[probe] {label}: ok={entry['ok']} peak={peak}GB step_avg={step_avg}s "
+            f"est={entry['est_hours_2k']}h ${entry['est_cost_usd_2k']}",
+            flush=True,
+        )
+        if result.get("ok") and recommended is None:
+            recommended = {
+                **result,
+                **metrics,
+                "gpu": "A100-80GB",
+                "batch_config": label,
+                "per_device_train_batch_size": batch_size,
+                "gradient_accumulation_steps": grad_accum,
+                "gradient_checkpointing": True,
+                "est_hours_2k": entry["est_hours_2k"],
+                "est_cost_usd_2k": entry["est_cost_usd_2k"],
+                "total_steps_2k": total_steps,
+                "recommended_gpu": (
+                    f"A100-80GB ({label}, peak {peak:.1f}GB, ~{entry['est_hours_2k']}h / ${entry['est_cost_usd_2k']})"
+                    if peak and entry["est_hours_2k"]
+                    else f"A100-80GB ({label})"
+                ),
+            }
+        if not result.get("ok"):
+            blob = (result.get("error") or "") + "\n".join(result.get("error_tail") or [])
+            if "OutOfMemoryError" not in blob and "CUDA out of memory" not in blob:
+                last = result
                 break
-        result["peak_vram_gb"] = peak
-        result["gpu"] = "A100-80GB"
-        result["batch_config"] = label
-        result["per_device_train_batch_size"] = batch_size
-        result["gradient_accumulation_steps"] = grad_accum
-        if result.get("ok"):
-            result["recommended_gpu"] = f"A100-80GB ({label}, peak {peak:.1f} GB)" if peak else f"A100-80GB ({label})"
-            if batch_size != 4 or grad_accum != 2:
-                result["config_note"] = (
-                    f"Update configs/train_e4b_broad.yaml to "
-                    f"per_device_train_batch_size={batch_size}, "
-                    f"gradient_accumulation_steps={grad_accum} before full train"
-                )
-            return result
         last = result
-        if not _is_oom(result):
-            result["recommended_gpu"] = "A100-80GB (probe failed — non-OOM error)"
-            return result
-        print(f"[probe] OOM at {label}; trying smaller micro-batch...", flush=True)
 
-    last["recommended_gpu"] = "A100-80GB (all batch candidates OOM — enable gradient_checkpointing)"
+    print("[probe] === benchmark summary (2k × 3 epochs, longest-32 stress) ===", flush=True)
+    for b in benchmarks:
+        status = "OK" if b["ok"] else "OOM"
+        t = f"{b['step_sec_avg']:.1f}s/step" if b["step_sec_avg"] else "—"
+        print(
+            f"  {b['label']}: {status} | VRAM {b['peak_vram_gb']}GB | {t} | "
+            f"{b['total_steps']} steps | est {b['est_hours_2k']}h ${b['est_cost_usd_2k']}",
+            flush=True,
+        )
+
+    if recommended:
+        recommended["benchmarks"] = benchmarks
+        return recommended
+    last["benchmarks"] = benchmarks
     last["gpu"] = "A100-80GB"
+    last["recommended_gpu"] = "A100-80GB (all grad_ckpt candidates failed)"
     return last
 
 
@@ -438,7 +516,7 @@ def train_remote(
     verify_loss_mask: bool = False,
     max_steps: int | None = None,
 ):
-    """Full broad SFT on A100-80GB (batch=4×accum=2 in config)."""
+    """Full broad SFT on A100-80GB (4×2 + grad_ckpt in config)."""
     return _train_impl(
         config_name,
         manifest_override=manifest_override,
