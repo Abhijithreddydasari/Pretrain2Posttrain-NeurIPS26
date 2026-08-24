@@ -2,7 +2,7 @@ model_id: google/gemma-4-E4B
 revision: main
 trust_remote_code: true
 torch_dtype: bfloat16
-load_in_4bit: true
+load_in_4bit: false
 attn_implementation: sdpa
 use_base_not_it: true
 prompt_template: |
@@ -19,15 +19,16 @@ lora:
 train:
   output_dir: outputs/e4b_broad
   num_train_epochs: 3
-  per_device_train_batch_size: 1
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 2  # effective batch 8; stress probe: 25.5GB, ~20.6s/step, ~4.3h
   learning_rate: 1.0e-4
   logging_steps: 10
-  save_strategy: steps
-  save_steps: 50
   max_seq_length: 4096
-  optim: paged_adamw_8bit
+  optim: adamw_torch
   bf16: true
+  gradient_checkpointing: true
+  dataloader_pin_memory: true
+  dataloader_num_workers: 0  # must stay 0: model on CUDA before DataLoader; forked workers crash
   remove_unused_columns: false
   report_to: none
   seed: 42

@@ -91,7 +91,7 @@ python -m data.scripts.generate_structsvg --pilot
 4. Shuffled/blank image control on a handful of preds  
 5. `python -m data.scripts.broad_checks --stage all` (or `--pilot`) → all gates PASS  
 6. Spot-check 20–30 PNGs in `data/processed/svg_diagrams/pngs/` are **960×960** and readable  
-7. Then launch matched broad vs StructSVG E4B runs  
+7. Then launch broad E4B SFT; eval on VFIG-Bench after checkpoints land  
 
 ## Outreach
 

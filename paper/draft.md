@@ -8,7 +8,7 @@
 
 ## Abstract (draft)
 
-We study whether LoRA supervised fine-tuning on a multimodal base VLM primarily teaches **SVG syntax** or also induces **compositional diagram structure** for image-to-native-SVG reconstruction. Using matched data budgets, we compare broad public diagram SVGs against a controlled **StructSVG** corpus (workflows + geometry) with typed scene graphs and compositional OOD splits. Dense early checkpoints and topology metrics (entity/relation F1, spatial aggregates) separate format learning from structure learning. External FlowGen topology evaluation and SVG-Diagrams perceptual scores provide secondary context. We hypothesize that validity rises early while structure lags—especially under broad data—unless structure-aware supervision is provided.
+We study whether LoRA supervised fine-tuning on a multimodal **base** VLM primarily teaches **SVG syntax** or also induces **compositional diagram structure** for image-to-native-SVG reconstruction. We SFT on a 2k broad-diagram coreset from StarVector, save dense early checkpoints, and evaluate on **VFIG-Bench** (400 gold-SVG ID + 198 image-only OOD) plus secondary SVG-Diagrams perceptual scores. We hypothesize that validity rises early while structure-oriented scores lag—especially on OOD—reflecting what plain broad SFT buys relative to the pretrained base.
 
 ## 1. Introduction
 
@@ -26,8 +26,9 @@ Image → canonical native SVG (`notes/canonical_svg.md`). Forbidden scripts/ras
 
 **Broad 2k (SFT A).** From the HF `starvector/svg-diagrams` train pool (~182k), we retain canonical-parseable SVGs, remove exact and perceptual near-duplicates, and exclude examples matching the held-out SVG-Diagrams test split (normalized SHA256). Each diagram is embedded with SigLIP on a rendered raster and concatenated with structural feature vectors (tag counts, tree depth, path complexity, text density). We select 2,000 training examples via mini-batch k-means medoid sampling over ~4k clusters, with additional slots for high-complexity and rare-cluster coverage (Fig. `broad_coreset_coverage`, `broad_bucket_distribution`, `broad_difficulty_hist`).
 
-- StructSVG 2k / 250 ID / 250 OOD: workflows + geometry; scene-graph sidecars.
-- Eval external: FlowGen; SVG-Diagrams test (secondary).
+- **Broad 2k (SFT).** From the HF `starvector/svg-diagrams` train pool (~182k), filtered and coreset-selected (see README).
+- **Eval:** VFIG-Bench 400 (primary); VFIG-Bench-OOD 198; SVG-Diagrams test (secondary).
+- **Optional follow-up:** 2nd-stage SFT on VFIG-Data 2k coreset (exclude bench IDs).
 
 ## 5. Method
 
@@ -41,8 +42,8 @@ Validity; entity F1; relation F1; spatial aggregate; DINO (secondary); ID–OOD 
 
 *[Tables/figures after runs]*
 
-- Checkpoint curves (Fig. 1)
-- Broad vs StructSVG (Table 1)
+- Checkpoint curves on VFIG-Bench (Fig. 1)
+- Base @ 0% vs SFT (Table 1)
 - ID vs OOD gaps (Table 2)
 - Qualitative failures: valid SVG, wrong topology (Fig. 2)
 

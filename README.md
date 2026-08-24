@@ -4,14 +4,11 @@ Does SFT on a multimodal base VLM teach **valid SVG first**, and **diagram struc
 
 This repo is the code and data for a short paper aimed at the NeurIPS 2026 workshop [*Transitioning from Pre-Training to Post-Training*](https://pretrain2posttrain.github.io/call.html).
 
-The setup is deliberately small and matched. **Gemma 4 E4B base**, LoRA SFT only, two 2k training conditions with similar token budgets:
+The setup is deliberately small. **Gemma 4 E4B base**, LoRA SFT on a **2k broad-diagram coreset** from [starvector/svg-diagrams](https://huggingface.co/datasets/starvector/svg-diagrams), then eval on **VFIG-Bench** (primary) plus secondary benches.
 
-1. **Broad** - heterogeneous public diagrams from [starvector/svg-diagrams](https://huggingface.co/datasets/starvector/svg-diagrams), filtered and coreset-selected.
-2. **StructSVG** - controlled workflows + geometry with gold scene graphs and a compositional OOD split.
+We save dense checkpoints (0, 5, 10, 20, 40, 60, 80, 100%) to see *when* syntax and structure move. **We do not train on VFIG-Data in v0** — VFIG is held-out eval. A optional **second SFT stage** (VFIG-Data 2k or sequential on the same adapter) is a follow-up ablation after broad curves exist.
 
-Primary eval is on StructSVG (validity, typed entity/relation F1, spatial aggregates). We save dense checkpoints (0, 5, 10, 20, 40, 60, 80, 100%) to see *when* syntax and structure move. VFIG-Bench is secondary eval only; we borrowed their code filter for broad curation but do not train on VFIG-Data in v0.
-
-**Working claim:** post-training mostly buys SVG syntax/format; compositional structure lags unless the data and eval are built for it.
+**Working claim:** post-training mostly buys SVG syntax/format; compositional structure lags on hard held-out figures unless data and eval pressure it.
 
 ---
 
@@ -20,25 +17,23 @@ Primary eval is on StructSVG (validity, typed entity/relation F1, spatial aggreg
 | Piece | Status |
 |-------|--------|
 | Broad 2k data pipeline | Done (182k scanned → 2k train) |
-| Eval harness + gold recovery | Done |
-| StructSVG generator | Pilot manifests; full 2k next |
-| Gemma E4B SFT + checkpoint curves | In progress |
+| Eval harness + gold recovery | Done (fixtures); VFIG-Bench adapter next |
+| Gemma E4B broad SFT + checkpoint curves | **Next** |
+| VFIG-Bench eval on checkpoints | After SFT |
 
 ---
 
 ## Pipeline
 
-End-to-end flow for the workshop study: two matched 2k SFT conditions, dense checkpoints, structure-first eval on StructSVG.
+End-to-end flow: broad 2k SFT, dense checkpoints, primary eval on VFIG-Bench.
 
 ```mermaid
 flowchart TB
   subgraph Data
     HF["HF stream<br/>starvector/svg-diagrams<br/>182k rows"]
-    VFIG["Validate + VFIG filter<br/>Clean ≥ 0.40, C ≤ 50"]
+    VFIGF["Validate + VFIG filter<br/>Clean ≥ 0.40, C ≤ 50"]
     POOL["Pool ~30k<br/>SigLIP + k-means"]
     BROAD["Broad train 2k"]
-    GEN["StructSVG generator"]
-    STRUCT["StructSVG train 2k<br/>workflows + geometry"]
   end
 
   BASE["Gemma 4 E4B base<br/>checkpoint 0%"]
@@ -47,21 +42,19 @@ flowchart TB
     CKPT["Checkpoints<br/>0, 5, 10, 20, 40, 60, 80, 100%"]
   end
 
-  subgraph Eval["Primary eval (StructSVG)"]
-    VAL["Validity"]
-    F1["Entity / relation F1"]
-    SPA["Spatial aggregate"]
-    OOD["ID vs compositional OOD"]
+  subgraph Eval["Primary eval (VFIG-Bench)"]
+    VAL["Validity + render"]
+    PIX["Pixel / perceptual sim"]
+    COMP["Component scores"]
+    OOD["VFIG-Bench-OOD<br/>198 image-only"]
   end
 
-  HF --> VFIG --> POOL --> BROAD
-  GEN --> STRUCT
+  HF --> VFIGF --> POOL --> BROAD
   BASE --> CKPT
   BROAD --> CKPT
-  STRUCT --> CKPT
   CKPT --> VAL
-  CKPT --> F1
-  CKPT --> SPA
+  CKPT --> PIX
+  CKPT --> COMP
   CKPT --> OOD
 ```
 
@@ -123,16 +116,14 @@ Processed outputs are written to `data/processed/svg_diagrams/` (gitignored). Se
 
 ## Evaluation
 
-Code: [structsvg_lib/](structsvg_lib/) (parse, render, scene-graph extract, metrics) and [eval/](eval/).
+Code: [structsvg_lib/](structsvg_lib/) (parse, render, metrics) and [eval/](eval/). See [eval/README.md](eval/README.md) for the full bench list.
 
-| Metric | Role |
-|--------|------|
-| Validity | XML parse + render + canonical profile (syntax) |
-| Entity / relation F1 | Typed scene-graph match |
-| Spatial aggregate | Workflow reachability; geometry relation accuracy |
-| ID vs compositional OOD | Structure generalization |
-| DINO | Secondary perceptual |
-| Controls | Correct / shuffled / blank image |
+| Bench | What it measures |
+|-------|------------------|
+| **VFIG-Bench (400)** | Validity, render, pixel/perceptual sim, VFIG component + VLM-judge structure scores |
+| **VFIG-Bench-OOD (198)** | Generalization on unseen figures (no gold SVG; judge + validity) |
+| **SVG-Diagrams test (~474)** | DINO / perceptual comparability (secondary) |
+| **Controls** | Correct vs shuffled vs blank image |
 
 Generations are cached once; metrics can be rescored without re-running the model.
 
@@ -155,10 +146,10 @@ Loss is CE on **target SVG tokens only** (image + prompt masked). Checkpoints ar
 ```text
 notes/          research statement, experiment card, canonical SVG spec
 configs/        train / eval YAML
-data/           schemas, broad + StructSVG scripts
-train/          LoRA SFT + Modal entrypoints
-eval/           runners, rubrics, fixtures
-structsvg_lib/  shared SVG + graph + metrics
+data/           schemas, broad scripts, VFIG eval adapter (planned)
+train/          LoRA SFT + Modal entrypoints (`train/modal_app.py`)
+eval/           runners, checkpoint curves
+structsvg_lib/  shared SVG parse/render/metrics (library name; not the dropped dataset)
 paper/          draft
 assets/         README figures (from broad analysis)
 ```
@@ -180,17 +171,15 @@ You need Gemma 4 **base** accepted on Hugging Face, `HF_TOKEN` set, and Modal se
 ### Quick commands
 
 ```bash
-# StructSVG pilot
-python -m data.scripts.generate_structsvg --pilot
-
 # Broad analysis plots (if processed data is local)
 python -m data.scripts.broad_analyze --out data/processed/svg_diagrams
 
-# Local train smoke
-python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml --dry-run
+# Broad train dry-run
+python -m train.lora_sft --config configs/train_e4b_broad.yaml --dry-run
 
-# Modal broad pipeline (full scan)
-modal run data/scripts/modal_broad_app.py --stage all
+# Modal E4B smoke + train
+modal run train/modal_app.py --task smoke
+modal run train/modal_app.py --task train --config train_e4b_broad.yaml
 ```
 
 ---
@@ -208,4 +197,4 @@ modal run data/scripts/modal_broad_app.py --stage all
 
 Paper draft: [paper/draft.md](paper/draft.md). Citation block will go here after submission.
 
-If you use the broad curation scripts or StructSVG generator, please cite this repo once the workshop paper is public.
+If you use the broad curation scripts, please cite this repo once the workshop paper is public.

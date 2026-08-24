@@ -23,6 +23,35 @@ def bitsandbytes_config(torch, *, compute_dtype: str = "bfloat16"):
     )
 
 
+def ensure_chat_template(processor, model_id: str, *, trust_remote_code: bool = True):
+    """Base checkpoints may ship without chat_template; borrow from the -it sibling for formatting."""
+    if getattr(processor, "chat_template", None):
+        return processor
+    tok = getattr(processor, "tokenizer", None)
+    if tok is not None and getattr(tok, "chat_template", None):
+        processor.chat_template = tok.chat_template
+        return processor
+    if model_id.endswith("-it"):
+        return processor
+    it_id = f"{model_id}-it"
+    try:
+        from transformers import AutoProcessor
+
+        it_proc = AutoProcessor.from_pretrained(it_id, trust_remote_code=trust_remote_code)
+        if getattr(it_proc, "chat_template", None):
+            processor.chat_template = it_proc.chat_template
+        elif getattr(it_proc, "tokenizer", None) and it_proc.tokenizer.chat_template:
+            processor.chat_template = it_proc.tokenizer.chat_template
+    except Exception:  # noqa: BLE001
+        pass
+    if not getattr(processor, "chat_template", None):
+        raise RuntimeError(
+            f"No chat_template on {model_id} and failed to load template from {it_id}. "
+            "TRL VLM SFT requires apply_chat_template."
+        )
+    return processor
+
+
 def load_vlm(
     model_id: str,
     *,
@@ -36,6 +65,7 @@ def load_vlm(
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    processor = ensure_chat_template(processor, model_id, trust_remote_code=trust_remote_code)
     kwargs: dict[str, Any] = {
         "device_map": "auto",
         "dtype": _dtype(torch, dtype_name),

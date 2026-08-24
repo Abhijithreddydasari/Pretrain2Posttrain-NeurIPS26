@@ -13,5 +13,6 @@ prompt_template: |
 svg_prefix_scaffold: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">"
 generation:
   max_new_tokens: 2048
+  max_time: 600
   do_sample: false
   temperature: 1.0

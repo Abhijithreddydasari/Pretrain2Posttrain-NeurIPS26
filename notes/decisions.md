@@ -4,6 +4,19 @@ Append-only. Newest first. If chat export conflicts with the user lock prompt, *
 
 ---
 
+## 2026-08-23 — E4B bf16 LoRA (not 4-bit) for main SFT
+
+| Decision | Choice |
+|----------|--------|
+| E4B main runs | **bf16 LoRA** — frozen bf16 base + bf16 adapters |
+| 4-bit QLoRA | Local E2B smoke/overfit only; not main study |
+| Rationale | Match VFIG-style SFT precision; avoid quantization confound on syntax vs structure timing |
+| GPU | Modal L4/A10G; local 8GB not for E4B |
+
+Configs `train_e4b_*.yaml` must set `load_in_4bit: false`, `optim: adamw_torch`.
+
+---
+
 ## 2026-08-12 — Structured SVG SFT lock (plan accepted)
 
 ### Locked

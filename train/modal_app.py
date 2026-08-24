@@ -8,38 +8,289 @@ app = modal.App("structsvg-sft")
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 vol_hf = modal.Volume.from_name("structsvg-hf-cache", create_if_missing=True)
-vol_data = modal.Volume.from_name("structsvg-data", create_if_missing=True)
 vol_out = modal.Volume.from_name("structsvg-outputs", create_if_missing=True)
 
-image = (
-    modal.Image.debian_slim(python_version="3.11")
-    .apt_install("libcairo2", "libgdk-pixbuf2.0-0", "libffi-dev", "shared-mime-info")
-    .pip_install(
-        "torch",
-        "torchvision",
-        "transformers>=4.52",
-        "accelerate",
-        "peft",
-        "bitsandbytes",
-        "trl",
-        "datasets",
-        "huggingface_hub",
-        "pillow",
-        "lxml",
-        "pyyaml",
-        "cairosvg",
-        "resvg_py",
-        "numpy",
-        "tqdm",
-        "jsonlines",
-        "scipy",
-        "scikit-learn",
-        "matplotlib",
-        "sentencepiece",
-        "protobuf",
+VOLUME_MOUNTS = {"/vol/hf": vol_hf, "/vol/out": vol_out}
+DATA_ROOT = "/root/data"
+
+_TRAIN_ENV = {
+    "PYTHONPATH": "/root",
+    "PYTHONUTF8": "1",
+    "PYTHONUNBUFFERED": "1",
+    "DATA_ROOT": DATA_ROOT,
+    "HF_HOME": "/vol/hf",
+    "HF_HUB_CACHE": "/vol/hf",
+    "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+    "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1",
+    "TQDM_DISABLE": "1",
+    "HF_XET_HIGH_PERFORMANCE": "1",
+    "TOKENIZERS_PARALLELISM": "false",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+}
+
+
+def _is_train_status_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return False
+    # Drop HF weight-shard progress bars only (keep our [train] milestones).
+    if "Loading weights:" in s and "[train]" not in s:
+        return False
+    if s.startswith("\r"):
+        return False
+    if "%|" in s and "[train]" not in s:
+        return False
+    if "[train]" in s or s.startswith("[probe]"):
+        return True
+    keep_prefixes = (
+        "loaded ",
+        "dry-run",
+        "loss mask",
+        "estimated total_steps",
+        "training complete",
+        "trainable params",
+        "PEAK_VRAM_ALLOC_GB",
+        "PEAK_VRAM_RESERVED_GB",
+        "STEP_SEC",
+        "seq_len=",
+        "supervised_preview",
+        "supervised_tokens=",
+        "Generating train split",
     )
-    .env({"HF_HOME": "/vol/hf", "HF_HUB_CACHE": "/vol/hf", "HF_XET_HIGH_PERFORMANCE": "1"})
+    if any(s.startswith(p) for p in keep_prefixes):
+        return True
+    if s.startswith("{'loss'") or s.startswith('{"loss"'):
+        return True
+    error_markers = (
+        "Traceback",
+        "Error",
+        "Exception",
+        "RuntimeError",
+        "CUDA out of memory",
+        "Cannot re-initialize CUDA",
+        "Killed",
+    )
+    if any(m in s for m in error_markers):
+        return True
+    return False
+
+
+def _print_task_result(result: dict) -> None:
+    """Print a compact summary; avoid dumping escaped stdout blobs."""
+    ok = result.get("ok")
+    print(f"status: {'OK' if ok else 'FAILED'}")
+    for key in (
+        "gpu",
+        "peak_vram_gb",
+        "max_mem_gb",
+        "recommended_gpu",
+        "batch_config",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "gradient_checkpointing",
+        "step_sec_avg",
+        "est_hours_2k",
+        "est_cost_usd_2k",
+        "total_steps_2k",
+        "benchmarks",
+        "loader",
+        "precision",
+        "manifest",
+        "output_dir",
+        "n",
+        "out",
+        "n_pngs",
+        "n_svgs",
+    ):
+        if key in result and result[key] is not None:
+            print(f"{key}: {result[key]}")
+    if not ok and result.get("error"):
+        print(f"error: {result['error']}")
+    if not ok and result.get("error_tail"):
+        print("--- last subprocess lines ---")
+        for line in result["error_tail"]:
+            print(line)
+    if result.get("returncode") not in (None, 0) and not ok:
+        print(f"returncode: {result['returncode']}")
+
+
+def _local_repo_root():
+    from pathlib import Path
+
+    p = Path(__file__).resolve()
+    for parent in [p.parent, *p.parents]:
+        if (parent / "requirements.txt").is_file() and (parent / "train" / "lora_sft.py").is_file():
+            return parent
+    raise FileNotFoundError("repo root not found for Modal train image")
+
+
+image = modal.Image.debian_slim(python_version="3.11").apt_install(
+    "libcairo2",
+    "libgdk-pixbuf2.0-0",
+    "libffi-dev",
+    "shared-mime-info",
 )
+
+if modal.is_local():
+    _repo = _local_repo_root()
+    image = (
+        image.pip_install_from_requirements(str(_repo / "requirements.txt"))
+        .env(_TRAIN_ENV)
+        .add_local_dir(str(_repo / "structsvg_lib"), remote_path="/root/structsvg_lib")
+        .add_local_dir(str(_repo / "train"), remote_path="/root/train")
+        .add_local_dir(str(_repo / "configs"), remote_path="/root/configs")
+        .add_local_dir(str(_repo / "eval"), remote_path="/root/eval")
+        .add_local_dir(str(_repo / "data" / "scripts"), remote_path="/root/data/scripts")
+    )
+    _broad = _repo / "data" / "processed" / "svg_diagrams"
+    if _broad.exists() and (_broad / "train_manifest.jsonl").exists():
+        image = image.add_local_dir(
+            str(_broad),
+            remote_path=f"{DATA_ROOT}/processed/svg_diagrams",
+        )
+    _vfig = _repo / "data" / "processed" / "vfig_bench"
+    if _vfig.exists() and (_vfig / "id_manifest.jsonl").exists():
+        image = image.add_local_dir(str(_vfig), remote_path=f"{DATA_ROOT}/processed/vfig_bench")
+    _svgtest = _repo / "data" / "processed" / "svg_diagrams_test"
+    if _svgtest.exists() and (_svgtest / "test_manifest.jsonl").exists():
+        image = image.add_local_dir(str(_svgtest), remote_path=f"{DATA_ROOT}/processed/svg_diagrams_test")
+else:
+    image = image.env(_TRAIN_ENV)
+
+
+def _resolve_train_config(cfg: dict, *, manifest_override: str | None = None) -> dict:
+    from pathlib import Path
+
+    if manifest_override:
+        cfg.setdefault("data", {})["manifest"] = manifest_override
+    else:
+        local_manifest = Path(cfg["data"]["manifest"])
+        vol_candidates = [
+            Path(DATA_ROOT) / "processed" / "svg_diagrams" / "train_manifest.jsonl",
+            Path(DATA_ROOT) / local_manifest.as_posix().lstrip("/"),
+            Path("/vol/data") / local_manifest.as_posix().lstrip("/"),
+            Path("/vol/data") / "processed" / "svg_diagrams" / "train_manifest.jsonl",
+        ]
+        for cand in vol_candidates:
+            if cand.exists():
+                cfg.setdefault("data", {})["manifest"] = str(cand)
+                break
+    return cfg
+
+
+def _parse_probe_metrics(lines: list[str]) -> dict:
+    import re
+
+    peak = peak_reserved = step_avg = None
+    for line in lines:
+        if m := re.search(r"PEAK_VRAM_ALLOC_GB=([0-9.]+)", line):
+            peak = float(m.group(1))
+        if m := re.search(r"PEAK_VRAM_RESERVED_GB=([0-9.]+)", line):
+            peak_reserved = float(m.group(1))
+        if m := re.search(r"STEP_SEC_AVG=([0-9.]+)", line):
+            step_avg = float(m.group(1))
+    return {"peak_vram_gb": peak, "peak_vram_reserved_gb": peak_reserved, "step_sec_avg": step_avg}
+
+
+def _run_train_subprocess(
+    cfg: dict,
+    *,
+    dry_run: bool = False,
+    verify_loss_mask: bool = False,
+    max_steps: int | None = None,
+) -> dict:
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    sys.path.insert(0, "/root")
+    cfg.setdefault("train", {})["output_dir"] = cfg["train"].get("output_dir", "/vol/out/e4b_broad")
+    if not str(cfg["train"]["output_dir"]).startswith("/vol/"):
+        cfg["train"]["output_dir"] = f"/vol/out/{Path(cfg['train']['output_dir']).name}"
+
+    runtime_cfg = Path("/tmp/runtime_train.yaml")
+    runtime_cfg.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    cmd = [sys.executable, "-u", "-m", "train.lora_sft", "--config", str(runtime_cfg)]
+    if dry_run:
+        cmd.append("--dry-run")
+    if verify_loss_mask:
+        cmd.append("--verify-loss-mask")
+    if max_steps is not None:
+        cmd.extend(["--max-steps", str(max_steps)])
+
+    print("[train]", " ".join(cmd))
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    from collections import deque
+
+    status_lines: deque[str] = deque(maxlen=20)
+    raw_tail: deque[str] = deque(maxlen=40)
+    error_chunks: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        raw_tail.append(line.rstrip("\n"))
+        if _is_train_status_line(line):
+            line = line.rstrip("\n")
+            status_lines.append(line)
+            print(line, flush=True)
+            if any(
+                m in line
+                for m in (
+                    "Traceback",
+                    "Error",
+                    "Exception",
+                    "RuntimeError",
+                    "CUDA out of memory",
+                    "Cannot re-initialize CUDA",
+                )
+            ):
+                error_chunks.append(line.rstrip("\n"))
+    proc.wait()
+    vol_out.commit()
+    ok = proc.returncode == 0
+    return {
+        "ok": ok,
+        "returncode": proc.returncode,
+        "manifest": cfg["data"]["manifest"],
+        "output_dir": cfg["train"]["output_dir"],
+        "status_tail": list(status_lines),
+        "error_tail": list(raw_tail) if not ok else [],
+        "error": "\n".join(error_chunks[-8:]) if (not ok and error_chunks) else None,
+    }
+
+
+@app.function(image=image, volumes=VOLUME_MOUNTS, timeout=60 * 60)
+def upload_broad_status():
+    """Check broad data presence (baked image or volume fallback)."""
+    from pathlib import Path
+
+    roots = [
+        Path(DATA_ROOT) / "processed" / "svg_diagrams",
+        Path("/vol/data") / "data" / "processed" / "svg_diagrams",
+        Path("/vol/data") / "processed" / "svg_diagrams",
+    ]
+    for root in roots:
+        man = root / "train_manifest.jsonl"
+        pngs = list((root / "pngs").glob("*.png")) if (root / "pngs").exists() else []
+        svgs = list((root / "svgs").glob("*.svg")) if (root / "svgs").exists() else []
+        if man.exists():
+            return {
+                "manifest_exists": True,
+                "manifest_path": str(man),
+                "n_pngs": len(pngs),
+                "n_svgs": len(svgs),
+                "ok": len(pngs) >= 100 and len(svgs) >= 100,
+                "root": str(root),
+            }
+    return {"ok": False, "manifest_exists": False}
 
 
 @app.function(
@@ -47,104 +298,394 @@ image = (
     gpu="L4",
     timeout=60 * 60,
     secrets=[hf_secret],
-    volumes={"/vol/hf": vol_hf, "/vol/data": vol_data, "/vol/out": vol_out},
+    volumes=VOLUME_MOUNTS,
 )
-def smoke_e4b():
-    """Load Gemma 4 E4B base with 4-bit BnB; profile VRAM.
-
-    Transformers 5: pass BitsAndBytesConfig, not load_in_4bit= on from_pretrained.
-    Use dtype= instead of torch_dtype=.
-    """
-    import os
+def smoke_e4b(*, bf16: bool = True):
+    """Load Gemma 4 E4B base; default bf16."""
     import traceback
 
     import torch
-    from transformers import AutoProcessor, BitsAndBytesConfig
 
-    model_id = "google/gemma-4-E4B"
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    assert token, "HF token missing (Modal secret huggingface-secret)"
+    from train.model_load import load_vlm
 
-    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-    load_kwargs = dict(
-        quantization_config=bnb,
-        device_map="auto",
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="sdpa",
-    )
+    try:
+        processor, model, loader = load_vlm(
+            "google/gemma-4-E4B",
+            load_in_4bit=not bf16,
+            dtype_name="bfloat16",
+            trust_remote_code=True,
+            attn_implementation="sdpa",
+        )
+        n_params = sum(p.numel() for p in model.parameters())
+        mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else None
+        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        import transformers as tf
 
-    model = None
-    loader = None
-    errors: list[str] = []
-    import transformers as tf
-
-    for cls_name in ("AutoModelForMultimodalLM", "AutoModelForImageTextToText"):
-        cls = getattr(tf, cls_name, None)
-        if cls is None:
-            errors.append(f"{cls_name} missing")
-            continue
-        try:
-            model = cls.from_pretrained(model_id, **load_kwargs)
-            loader = cls_name
-            break
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{cls_name}: {type(e).__name__}: {e}")
-
-    if model is None:
         return {
-            "ok": False,
-            "error": errors,
-            "traceback": traceback.format_exc()[-2000:],
+            "ok": True,
+            "loader": loader,
+            "processor": type(processor).__name__,
+            "n_params": n_params,
+            "max_mem_gb": round(mem, 2) if mem is not None else None,
+            "gpu": gpu,
             "transformers": getattr(tf, "__version__", "?"),
+            "precision": "bf16" if bf16 else "4bit",
         }
-
-    n_params = sum(p.numel() for p in model.parameters())
-    mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else None
-    gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
-    vol_out.commit()
-    return {
-        "ok": True,
-        "model_id": model_id,
-        "loader": loader,
-        "processor": type(processor).__name__,
-        "n_params": n_params,
-        "max_mem_gb": round(mem, 2) if mem is not None else None,
-        "gpu": gpu,
-        "transformers": getattr(tf, "__version__", "?"),
-    }
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e), "traceback": traceback.format_exc()[-2000:]}
 
 
 @app.function(
     image=image,
-    gpu="A10G",
-    timeout=6 * 60 * 60,
+    gpu="A100-80GB",
+    timeout=60 * 60,
     secrets=[hf_secret],
-    volumes={"/vol/hf": vol_hf, "/vol/data": vol_data, "/vol/out": vol_out},
+    volumes=VOLUME_MOUNTS,
 )
-def train_remote(config_name: str = "train_e4b_structsvg.yaml"):
-    """
-    Placeholder remote train launcher.
-    Sync repo into image or mount code; for now instructs user to `modal run` after syncing.
-    """
-    return {
-        "status": "ready_stub",
-        "hint": f"Mount repo and run train.lora_sft --config configs/{config_name}",
-        "config": config_name,
-    }
+def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int = 2000):
+    """Stress probe: 4×2 → 3×3 → 2×4 → 1×8 (all grad_ckpt); VRAM + step timing."""
+    import copy
+    import json
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    sys.path.insert(0, "/root")
+    from train.checkpoint_utils import estimate_total_steps
+    from train.data_utils import load_manifest, longest_rows, resolve_svg
+
+    cfg_path = Path("/root/configs/train_e4b_broad.yaml")
+    base_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    num_epochs = float(base_cfg["train"].get("num_train_epochs", 3))
+    base_cfg = _resolve_train_config(base_cfg)
+    man = Path(base_cfg["data"]["manifest"])
+    all_rows = load_manifest(man, base_cfg["data"].get("max_samples"))
+    stress_rows = longest_rows(all_rows, max_samples)
+    top_len = len(resolve_svg(stress_rows[0])) if stress_rows else 0
+    print(f"[probe] stress set: {len(stress_rows)} longest SVGs (max svg chars={top_len})", flush=True)
+
+    stress_manifest = Path("/tmp/probe_stress_manifest.jsonl")
+    stress_manifest.write_text("\n".join(json.dumps(r) for r in stress_rows) + "\n", encoding="utf-8")
+    base_cfg["data"]["manifest"] = str(stress_manifest)
+    base_cfg["data"]["max_samples"] = len(stress_rows)
+    base_cfg["train"]["logging_steps"] = 1
+
+    candidates = [
+        (4, 2, "4×2+grad_ckpt eff=8"),
+        (3, 3, "3×3+grad_ckpt eff=9"),
+        (2, 4, "2×4+grad_ckpt eff=8"),
+        (1, 8, "1×8+grad_ckpt eff=8"),
+    ]
+    modal_hr = 2.50
+    benchmarks: list[dict] = []
+    recommended: dict | None = None
+    last: dict = {"ok": False, "error": "no candidates tried"}
+
+    for batch_size, grad_accum, label in candidates:
+        cfg = copy.deepcopy(base_cfg)
+        cfg["train"].update(
+            {
+                "per_device_train_batch_size": batch_size,
+                "gradient_accumulation_steps": grad_accum,
+                "gradient_checkpointing": True,
+                "output_dir": f"/vol/out/probe_train_b{batch_size}a{grad_accum}_gc",
+            }
+        )
+        print(f"[probe] trying {label} on A100-80GB...", flush=True)
+        result = _run_train_subprocess(cfg, max_steps=max_steps)
+        metrics = _parse_probe_metrics((result.get("status_tail") or []) + (result.get("error_tail") or []))
+        peak = metrics["peak_vram_gb"]
+        step_avg = metrics["step_sec_avg"]
+        total_steps = estimate_total_steps(
+            n_train_samples,
+            num_train_epochs=num_epochs,
+            per_device_train_batch_size=batch_size,
+            gradient_accumulation_steps=grad_accum,
+        )
+        est_hours = (total_steps * step_avg / 3600) if (step_avg and result.get("ok")) else None
+        est_cost = (est_hours * modal_hr) if est_hours else None
+        entry = {
+            "label": label,
+            "ok": bool(result.get("ok")),
+            "batch": batch_size,
+            "accum": grad_accum,
+            "effective_batch": batch_size * grad_accum,
+            "total_steps": total_steps,
+            **metrics,
+            "est_hours_2k": round(est_hours, 2) if est_hours else None,
+            "est_cost_usd_2k": round(est_cost, 2) if est_cost else None,
+        }
+        benchmarks.append(entry)
+        print(
+            f"[probe] {label}: ok={entry['ok']} peak={peak}GB step_avg={step_avg}s "
+            f"est={entry['est_hours_2k']}h ${entry['est_cost_usd_2k']}",
+            flush=True,
+        )
+        if result.get("ok") and recommended is None:
+            recommended = {
+                **result,
+                **metrics,
+                "gpu": "A100-80GB",
+                "batch_config": label,
+                "per_device_train_batch_size": batch_size,
+                "gradient_accumulation_steps": grad_accum,
+                "gradient_checkpointing": True,
+                "est_hours_2k": entry["est_hours_2k"],
+                "est_cost_usd_2k": entry["est_cost_usd_2k"],
+                "total_steps_2k": total_steps,
+                "recommended_gpu": (
+                    f"A100-80GB ({label}, peak {peak:.1f}GB, ~{entry['est_hours_2k']}h / ${entry['est_cost_usd_2k']})"
+                    if peak and entry["est_hours_2k"]
+                    else f"A100-80GB ({label})"
+                ),
+            }
+        if not result.get("ok"):
+            blob = (result.get("error") or "") + "\n".join(result.get("error_tail") or [])
+            if "OutOfMemoryError" not in blob and "CUDA out of memory" not in blob:
+                last = result
+                break
+        last = result
+
+    print("[probe] === benchmark summary (2k × 3 epochs, longest-32 stress) ===", flush=True)
+    for b in benchmarks:
+        status = "OK" if b["ok"] else "OOM"
+        t = f"{b['step_sec_avg']:.1f}s/step" if b["step_sec_avg"] else "—"
+        print(
+            f"  {b['label']}: {status} | VRAM {b['peak_vram_gb']}GB | {t} | "
+            f"{b['total_steps']} steps | est {b['est_hours_2k']}h ${b['est_cost_usd_2k']}",
+            flush=True,
+        )
+
+    if recommended:
+        recommended["benchmarks"] = benchmarks
+        return recommended
+    last["benchmarks"] = benchmarks
+    last["gpu"] = "A100-80GB"
+    last["recommended_gpu"] = "A100-80GB (all grad_ckpt candidates failed)"
+    return last
+
+
+def _train_impl(
+    config_name: str,
+    *,
+    manifest_override: str | None = None,
+    output_override: str | None = None,
+    max_samples: int | None = None,
+    dry_run: bool = False,
+    verify_loss_mask: bool = False,
+    max_steps: int | None = None,
+):
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    sys.path.insert(0, "/root")
+    cfg_path = Path("/root/configs") / config_name
+    if not cfg_path.exists():
+        return {"ok": False, "error": f"missing config {cfg_path}"}
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg = _resolve_train_config(cfg, manifest_override=manifest_override)
+    if output_override:
+        cfg.setdefault("train", {})["output_dir"] = output_override
+    if max_samples is not None:
+        cfg.setdefault("data", {})["max_samples"] = max_samples
+    return _run_train_subprocess(
+        cfg,
+        dry_run=dry_run,
+        verify_loss_mask=verify_loss_mask,
+        max_steps=max_steps,
+    )
+
+
+@app.function(
+    image=image,
+    gpu="A100-80GB",
+    timeout=12 * 60 * 60,
+    secrets=[hf_secret],
+    volumes=VOLUME_MOUNTS,
+)
+def train_remote(
+    config_name: str = "train_e4b_broad.yaml",
+    *,
+    manifest_override: str | None = None,
+    output_override: str | None = None,
+    max_samples: int | None = None,
+    dry_run: bool = False,
+    verify_loss_mask: bool = False,
+    max_steps: int | None = None,
+):
+    """Full broad SFT on A100-80GB (4×2 + grad_ckpt in config)."""
+    return _train_impl(
+        config_name,
+        manifest_override=manifest_override,
+        output_override=output_override,
+        max_samples=max_samples,
+        dry_run=dry_run,
+        verify_loss_mask=verify_loss_mask,
+        max_steps=max_steps,
+    )
+
+
+@app.function(
+    image=image,
+    gpu="L4",
+    timeout=12 * 60 * 60,
+    secrets=[hf_secret],
+    volumes=VOLUME_MOUNTS,
+)
+def infer_remote(
+    manifest_path: str,
+    out_path: str,
+    *,
+    config_name: str = "model_e4b.yaml",
+    adapter_path: str | None = None,
+    protocol: str = "prompt",
+    max_samples: int | None = None,
+):
+    """Generate SVG preds for a manifest (base or LoRA adapter)."""
+    import json
+    import sys
+    from pathlib import Path
+
+    import torch
+    import yaml
+
+    sys.path.insert(0, "/root")
+    from peft import PeftModel
+
+    from train.data_utils import load_manifest, resolve_image
+    from train.model_load import load_vlm
+
+    cfg = yaml.safe_load((Path("/root/configs") / config_name).read_text(encoding="utf-8"))
+    man = Path(manifest_path)
+    if not man.exists():
+        man = Path(DATA_ROOT) / manifest_path.lstrip("/")
+    rows = load_manifest(man, max_samples)
+    prompt = cfg.get("prompt_template", "").strip()
+    prefix = cfg.get("svg_prefix_scaffold", "")
+    gen_cfg = cfg.get("generation", {})
+
+    processor, model, loader = load_vlm(
+        cfg["model_id"],
+        load_in_4bit=bool(cfg.get("load_in_4bit", False)),
+        dtype_name=cfg.get("torch_dtype", "bfloat16"),
+        trust_remote_code=True,
+    )
+    if adapter_path:
+        ap = Path(adapter_path)
+        if not ap.exists():
+            ap = Path(DATA_ROOT) / adapter_path.lstrip("/")
+        model = PeftModel.from_pretrained(model, str(ap))
+    model.eval()
+    print(f"infer via {loader} adapter={adapter_path}")
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as f:
+        for r in rows:
+            image = resolve_image(r)
+            messages = [{"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": prompt}]}]
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            if protocol == "svg_prefix":
+                text = text + prefix
+            inputs = processor(text=[text], images=[image], return_tensors="pt").to(model.device)
+            input_len = int(inputs["input_ids"].shape[-1])
+            with torch.no_grad():
+                out_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=gen_cfg.get("max_new_tokens", 2048),
+                    do_sample=gen_cfg.get("do_sample", False),
+                    max_time=gen_cfg.get("max_time", 600),
+                )
+            new_ids = out_ids[0][input_len:]
+            decoded = processor.decode(new_ids, skip_special_tokens=True)
+            f.write(json.dumps({"id": r["id"], "pred_text": decoded, "protocol": protocol}) + "\n")
+            f.flush()
+            print(f"generated {r['id']}", flush=True)
+    vol_out.commit()
+    return {"ok": True, "n": len(rows), "out": str(out)}
+
+
+@app.function(
+    image=image,
+    gpu="L4",
+    timeout=24 * 60 * 60,
+    secrets=[hf_secret],
+    volumes=VOLUME_MOUNTS,
+)
+def sweep_remote(
+    *,
+    adapter_root: str = "/vol/out/e4b_broad",
+    protocol: str = "prompt",
+    pcts: str = "0,5,10,20,40,60,80,100",
+    max_samples: int | None = None,
+):
+    import subprocess
+    import sys
+
+    sys.path.insert(0, "/root")
+    cmd = [
+        sys.executable,
+        "-m",
+        "eval.sweep_checkpoints",
+        "--adapter-root",
+        adapter_root,
+        "--protocol",
+        protocol,
+        "--pcts",
+        pcts,
+        "--out-dir",
+        "/vol/out/metrics/sweep",
+    ]
+    if max_samples:
+        cmd.extend(["--max-samples", str(max_samples)])
+    print("[sweep]", " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    from collections import deque
+
+    status_lines: deque[str] = deque(maxlen=20)
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        if _is_train_status_line(line) or line.strip().startswith("$"):
+            line = line.rstrip("\n")
+            status_lines.append(line)
+            print(line, flush=True)
+    proc.wait()
+    vol_out.commit()
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode, "status_tail": list(status_lines)}
 
 
 @app.local_entrypoint()
-def main(task: str = "smoke"):
+def main(
+    task: str = "smoke",
+    config: str = "train_e4b_broad.yaml",
+    manifest: str = "",
+    out: str = "",
+    adapter: str = "",
+    protocol: str = "prompt",
+    max_samples: int = 0,
+):
+    ms = max_samples if max_samples > 0 else None
     if task == "smoke":
-        print(smoke_e4b.remote())
+        _print_task_result(smoke_e4b.remote(bf16=True))
+    elif task == "upload_status":
+        _print_task_result(upload_broad_status.remote())
+    elif task == "probe":
+        _print_task_result(probe_train.remote())
+    elif task == "train_dry":
+        _print_task_result(train_remote.remote(config, dry_run=True))
+    elif task == "verify_mask":
+        _print_task_result(train_remote.remote(config, verify_loss_mask=True, max_samples=8))
     elif task == "train":
-        print(train_remote.remote())
+        _print_task_result(train_remote.remote(config))
+    elif task == "infer":
+        if not manifest or not out:
+            raise SystemExit("infer requires --manifest and --out")
+        ap = adapter or None
+        _print_task_result(infer_remote.remote(manifest, out, adapter_path=ap, protocol=protocol, max_samples=ms))
+    elif task == "sweep":
+        _print_task_result(sweep_remote.remote(protocol=protocol, max_samples=ms))
     else:
         raise SystemExit(f"unknown task {task}")
