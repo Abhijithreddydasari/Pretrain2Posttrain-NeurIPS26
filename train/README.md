@@ -35,11 +35,11 @@ python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml
 # Base inference dry-run
 python -m train.base_infer --manifest data/processed/svg_diagrams/train_manifest.jsonl --dry-run
 
-# E4B broad SFT (Modal — L4 24GB)
-modal run train/modal_app.py --task smoke      # load-only VRAM check
+# E4B broad SFT (Modal — A100-80GB, batch=3×accum=3)
+modal run train/modal_app.py --task smoke      # load-only VRAM check (L4)
 modal run train/modal_app.py --task train_dry  # 2000 rows, no GPU train
 modal run train/modal_app.py --task verify_mask
-modal run train/modal_app.py --task probe      # 2 train steps, peak VRAM
+modal run train/modal_app.py --task probe      # batch ladder 4→3→2 on A100-80GB
 modal run train/modal_app.py --task train      # full SFT → /vol/out/e4b_broad/
 
 # After train — eval on Modal (sequential, not parallel with train)
@@ -55,7 +55,21 @@ Configs: `configs/train_e2b_qlora_smoke.yaml`, `configs/train_e4b_broad.yaml`.
 Modal secret: `huggingface-secret` with `HF_TOKEN`. Volumes: HF cache, `structsvg-outputs`.  
 Training entrypoint: **`train/modal_app.py`** (not `data/scripts/modal_broad_app.py`, which is the data pipeline).
 
-**GPU:** **L4** only (24GB). Probe at ~21 s/step; full run ~750 steps ≈ 4–5 h. Adapters saved to volume `structsvg-outputs` under `e4b_broad/checkpoint_pct_XXX/`.
+**GPU:** **A100-80GB** for train/probe. Smoke stays on L4 (cheap load test).  
+**Batch:** 3×accum 3 (effective 9, ~64 GB VRAM peak). Dataset cached in host RAM once (~5–6 GiB decoded).
+
+**Metrics saved during train** (under `outputs/e4b_broad/` → Modal `/vol/out/e4b_broad/`):
+- `train_log.jsonl` — streaming loss/grad_norm/lr every 10 steps
+- `train_log.json` — full `log_history` at end
+- `trainer_state.json` — HF trainer state (for resume/debug)
+- `checkpoint_manifest.json` — pct→step→adapter path map
+
+**Paper checkpoint curves** (validity, SSIM, DINO vs SFT %) come from **eval after train**, not training loss:
+```bash
+modal run train/modal_app.py --task sweep --protocol prompt
+# → outputs/metrics/sweep/curves_prompt.json
+python -m eval.checkpoint_curves --curves outputs/metrics/sweep/curves_prompt.json
+```
 
 **Eval timing:** Training and eval are **separate**. `--task train` only writes LoRA adapters. Run `--task infer` per checkpoint/bench, or `--task sweep` after train to generate + score all checkpoints on VFIG ID/OOD + SVG-Diagrams test sequentially.
 
@@ -65,6 +79,17 @@ Training entrypoint: **`train/modal_app.py`** (not `data/scripts/modal_broad_app
 |-----|--------|----------|---|
 | Base (0%) | — | — | no training; eval only |
 | Broad SFT | `train_e4b_broad.yaml` | `data/processed/svg_diagrams/train_manifest.jsonl` | 2k |
+
+**Broad 2k on disk (gitignored locally):**
+
+```text
+data/processed/svg_diagrams/
+  train_manifest.jsonl   # 2000 rows
+  pngs/                  # 2000 × 960×960 PNG (~63 MiB)
+  svgs/                  # 2000 canonical SVGs (~12 MiB)
+```
+
+On Modal the same tree is baked into the train image at `/root/data/processed/svg_diagrams/` (also reachable via `structsvg-data` volume as fallback). Training loads all PNG+SVG into **host RAM once** before the model (~5–6 GiB decoded); no per-epoch disk reads.
 
 Model: **`google/gemma-4-E4B`** — the **base** (pretrained) checkpoint, **not** `google/gemma-4-E4B-it`.
 

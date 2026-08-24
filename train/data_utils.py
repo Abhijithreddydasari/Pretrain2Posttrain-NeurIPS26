@@ -128,3 +128,31 @@ def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
         ],
         "completion": [{"role": "assistant", "content": [{"type": "text", "text": svg}]}],
     }
+
+
+def materialize_train_examples(
+    rows: list[dict],
+    *,
+    prompt: str = PROMPT,
+    log_fn=None,
+    log_every: int = 100,
+) -> list[dict]:
+    """Load every PNG+SVG once into RAM; reused across all epochs (no per-epoch disk reload)."""
+    n = len(rows)
+    out: list[dict] = []
+    svg_chars = 0
+    for i, row in enumerate(rows):
+        if log_fn and (i == 0 or (i + 1) % log_every == 0 or i + 1 == n):
+            log_fn(f"caching examples {i + 1}/{n} (disk → RAM, once per run)")
+        ex = build_train_example(row, prompt=prompt)
+        svg_chars += len(ex["completion"][0]["content"][0]["text"])
+        out.append(ex)
+    if log_fn and n:
+        # Decoded PIL RGB ~ width×height×3; PNGs are 960×960 letterboxed in this pipeline.
+        img_bytes = sum(len(img.tobytes()) for ex in out for img in ex["images"])
+        ram_mb = (svg_chars + img_bytes) / (1024 * 1024)
+        log_fn(
+            f"RAM cache ~{ram_mb:.0f} MiB ({n} rows: {svg_chars / 1024:.0f} KiB SVG text + "
+            f"{img_bytes / (1024 * 1024):.0f} MiB decoded PNGs; disk pngs+svgs ~75 MiB compressed)"
+        )
+    return out

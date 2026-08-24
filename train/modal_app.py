@@ -26,6 +26,7 @@ _TRAIN_ENV = {
     "TQDM_DISABLE": "1",
     "HF_XET_HIGH_PERFORMANCE": "1",
     "TOKENIZERS_PARALLELISM": "false",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
 }
 
 
@@ -59,6 +60,17 @@ def _is_train_status_line(line: str) -> bool:
         return True
     if s.startswith("{'loss'") or s.startswith('{"loss"'):
         return True
+    error_markers = (
+        "Traceback",
+        "Error",
+        "Exception",
+        "RuntimeError",
+        "CUDA out of memory",
+        "Cannot re-initialize CUDA",
+        "Killed",
+    )
+    if any(m in s for m in error_markers):
+        return True
     return False
 
 
@@ -71,6 +83,10 @@ def _print_task_result(result: dict) -> None:
         "peak_vram_gb",
         "max_mem_gb",
         "recommended_gpu",
+        "batch_config",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "config_note",
         "loader",
         "precision",
         "manifest",
@@ -84,6 +100,10 @@ def _print_task_result(result: dict) -> None:
             print(f"{key}: {result[key]}")
     if not ok and result.get("error"):
         print(f"error: {result['error']}")
+    if not ok and result.get("error_tail"):
+        print("--- last subprocess lines ---")
+        for line in result["error_tail"]:
+            print(line)
     if result.get("returncode") not in (None, 0) and not ok:
         print(f"returncode: {result['returncode']}")
 
@@ -192,20 +212,38 @@ def _run_train_subprocess(
     from collections import deque
 
     status_lines: deque[str] = deque(maxlen=20)
+    raw_tail: deque[str] = deque(maxlen=40)
+    error_chunks: list[str] = []
     assert proc.stdout is not None
     for line in proc.stdout:
+        raw_tail.append(line.rstrip("\n"))
         if _is_train_status_line(line):
             line = line.rstrip("\n")
             status_lines.append(line)
             print(line, flush=True)
+            if any(
+                m in line
+                for m in (
+                    "Traceback",
+                    "Error",
+                    "Exception",
+                    "RuntimeError",
+                    "CUDA out of memory",
+                    "Cannot re-initialize CUDA",
+                )
+            ):
+                error_chunks.append(line.rstrip("\n"))
     proc.wait()
     vol_out.commit()
+    ok = proc.returncode == 0
     return {
-        "ok": proc.returncode == 0,
+        "ok": ok,
         "returncode": proc.returncode,
         "manifest": cfg["data"]["manifest"],
         "output_dir": cfg["train"]["output_dir"],
         "status_tail": list(status_lines),
+        "error_tail": list(raw_tail) if not ok else [],
+        "error": "\n".join(error_chunks[-8:]) if (not ok and error_chunks) else None,
     }
 
 
@@ -279,13 +317,14 @@ def smoke_e4b(*, bf16: bool = True):
 
 @app.function(
     image=image,
-    gpu="L4",
+    gpu="A100-80GB",
     timeout=60 * 60,
     secrets=[hf_secret],
     volumes=VOLUME_MOUNTS,
 )
 def probe_train(max_samples: int = 8, max_steps: int = 2):
-    """2-step training probe on L4; reports peak VRAM from training subprocess."""
+    """2-step probe on A100-80GB; tries batch ladder until one fits, reports peak VRAM."""
+    import copy
     import re
     import sys
     from pathlib import Path
@@ -294,30 +333,59 @@ def probe_train(max_samples: int = 8, max_steps: int = 2):
 
     sys.path.insert(0, "/root")
     cfg_path = Path("/root/configs/train_e4b_broad.yaml")
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    cfg = _resolve_train_config(cfg)
-    cfg.setdefault("data", {})["max_samples"] = max_samples
-    cfg.setdefault("train", {})["output_dir"] = "/vol/out/probe_train"
-    cfg["train"]["logging_steps"] = 1
+    base_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    base_cfg = _resolve_train_config(base_cfg)
+    base_cfg.setdefault("data", {})["max_samples"] = max_samples
+    base_cfg["train"]["logging_steps"] = 1
 
-    result = _run_train_subprocess(cfg, max_steps=max_steps)
-    peak = None
-    for line in result.get("status_tail") or []:
-        m = re.search(r"PEAK_VRAM_GB=([0-9.]+)", line)
-        if m:
-            peak = float(m.group(1))
-            break
-    result["peak_vram_gb"] = peak
-    result["gpu"] = "L4"
-    if peak is None:
-        result["recommended_gpu"] = "L4 (VRAM not reported; probe steps completed)"
-    elif peak <= 20:
-        result["recommended_gpu"] = "L4"
-    elif peak <= 24:
-        result["recommended_gpu"] = "A10G"
-    else:
-        result["recommended_gpu"] = "L40S or A100"
-    return result
+    # Prefer larger micro-batches (same or near effective batch); fall back on OOM.
+    candidates = [
+        (4, 2, "batch4_accum2 effective=8"),
+        (3, 3, "batch3_accum3 effective=9"),
+        (2, 4, "batch2_accum4 effective=8"),
+    ]
+
+    def _is_oom(res: dict) -> bool:
+        blob = (res.get("error") or "") + "\n".join(res.get("error_tail") or [])
+        return "OutOfMemoryError" in blob or "CUDA out of memory" in blob
+
+    last: dict = {"ok": False, "error": "no candidates tried"}
+    for batch_size, grad_accum, label in candidates:
+        cfg = copy.deepcopy(base_cfg)
+        cfg["train"]["per_device_train_batch_size"] = batch_size
+        cfg["train"]["gradient_accumulation_steps"] = grad_accum
+        cfg["train"]["output_dir"] = f"/vol/out/probe_train_b{batch_size}a{grad_accum}"
+        print(f"[probe] trying {label} on A100-80GB...", flush=True)
+        result = _run_train_subprocess(cfg, max_steps=max_steps)
+        peak = None
+        for line in (result.get("status_tail") or []) + (result.get("error_tail") or []):
+            m = re.search(r"PEAK_VRAM_GB=([0-9.]+)", line)
+            if m:
+                peak = float(m.group(1))
+                break
+        result["peak_vram_gb"] = peak
+        result["gpu"] = "A100-80GB"
+        result["batch_config"] = label
+        result["per_device_train_batch_size"] = batch_size
+        result["gradient_accumulation_steps"] = grad_accum
+        if result.get("ok"):
+            result["recommended_gpu"] = f"A100-80GB ({label}, peak {peak:.1f} GB)" if peak else f"A100-80GB ({label})"
+            if batch_size != 4 or grad_accum != 2:
+                result["config_note"] = (
+                    f"Update configs/train_e4b_broad.yaml to "
+                    f"per_device_train_batch_size={batch_size}, "
+                    f"gradient_accumulation_steps={grad_accum} before full train"
+                )
+            return result
+        last = result
+        if not _is_oom(result):
+            result["recommended_gpu"] = "A100-80GB (probe failed — non-OOM error)"
+            return result
+        print(f"[probe] OOM at {label}; trying smaller micro-batch...", flush=True)
+
+    last["recommended_gpu"] = "A100-80GB (all batch candidates OOM — enable gradient_checkpointing)"
+    last["gpu"] = "A100-80GB"
+    return last
 
 
 def _train_impl(
@@ -355,7 +423,7 @@ def _train_impl(
 
 @app.function(
     image=image,
-    gpu="L4",
+    gpu="A100-80GB",
     timeout=12 * 60 * 60,
     secrets=[hf_secret],
     volumes=VOLUME_MOUNTS,
@@ -370,7 +438,7 @@ def train_remote(
     verify_loss_mask: bool = False,
     max_steps: int | None = None,
 ):
-    """Full broad SFT on L4 (24GB). Probe showed ~21 s/step; ~4–5 h for 750 steps."""
+    """Full broad SFT on A100-80GB (batch=4×accum=2 in config)."""
     return _train_impl(
         config_name,
         manifest_override=manifest_override,

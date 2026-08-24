@@ -35,6 +35,35 @@ def pct_to_steps(checkpoints_pct: list[int | float], total_steps: int) -> dict[i
     return out
 
 
+class TrainMetricsCallback(TrainerCallback):
+    """Append training metrics to disk for loss-curve plotting."""
+
+    def __init__(self, output_dir: str | Path):
+        self.output_dir = Path(output_dir)
+        self.trainer = None
+
+    def bind_trainer(self, trainer) -> None:
+        self.trainer = trainer
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        entry = {"step": int(state.global_step), **logs}
+        with (self.output_dir / "train_log.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def on_train_end(self, args, state, control, **kwargs):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        (self.output_dir / "train_log.json").write_text(
+            json.dumps(state.log_history, indent=2),
+            encoding="utf-8",
+        )
+        if self.trainer is not None:
+            self.trainer.save_state()
+        print(f"[train] saved train_log.json ({len(state.log_history)} points)", flush=True)
+
+
 class CheckpointPctCallback(TrainerCallback):
     """Save LoRA adapter snapshots at configured pct milestones."""
 
@@ -116,14 +145,12 @@ class SampleProgressCallback(TrainerCallback):
         seen = int(state.global_step) * effective
         if seen < self._next_milestone:
             return
-        while seen >= self._next_milestone:
-            loss = None
-            if state.log_history:
-                loss = state.log_history[-1].get("loss")
-            epoch = state.log_history[-1].get("epoch") if state.log_history else "?"
-            print(
-                f"[train] examples {self._next_milestone}/{self.total_examples} "
-                f"step {state.global_step} epoch {epoch} loss={loss}",
-                flush=True,
-            )
+        loss = state.log_history[-1].get("loss") if state.log_history else None
+        epoch = state.log_history[-1].get("epoch") if state.log_history else "?"
+        print(
+            f"[train] examples {seen}/{self.total_examples} "
+            f"step {state.global_step} epoch {epoch} loss={loss}",
+            flush=True,
+        )
+        while self._next_milestone <= seen:
             self._next_milestone += self.interval
