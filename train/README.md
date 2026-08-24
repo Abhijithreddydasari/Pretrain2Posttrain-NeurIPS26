@@ -35,9 +35,16 @@ python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml
 # Base inference dry-run
 python -m train.base_infer --manifest data/processed/svg_diagrams/train_manifest.jsonl --dry-run
 
-# E4B broad SFT (Modal recommended)
-modal run train/modal_app.py --task smoke
-modal run train/modal_app.py --task train --config train_e4b_broad.yaml
+# E4B broad SFT (Modal — L4 24GB)
+modal run train/modal_app.py --task smoke      # load-only VRAM check
+modal run train/modal_app.py --task train_dry  # 2000 rows, no GPU train
+modal run train/modal_app.py --task verify_mask
+modal run train/modal_app.py --task probe      # 2 train steps, peak VRAM
+modal run train/modal_app.py --task train      # full SFT → /vol/out/e4b_broad/
+
+# After train — eval on Modal (sequential, not parallel with train)
+modal run train/modal_app.py --task infer --manifest data/processed/vfig_bench/id_manifest.jsonl --out /vol/out/generations/base_0pct_vfig_prompt.jsonl --protocol prompt
+modal run train/modal_app.py --task sweep --protocol prompt   # all checkpoints × 3 benches
 
 # Modal broad data pipeline (separate app; already done)
 modal run data/scripts/modal_broad_app.py --stage all --pilot
@@ -45,8 +52,12 @@ modal run data/scripts/modal_broad_app.py --stage all --pilot
 
 Configs: `configs/train_e2b_qlora_smoke.yaml`, `configs/train_e4b_broad.yaml`.
 
-Modal secret: `huggingface-secret` with `HF_TOKEN`. Volumes: HF cache, `structsvg-data`, `structsvg-outputs`.  
+Modal secret: `huggingface-secret` with `HF_TOKEN`. Volumes: HF cache, `structsvg-outputs`.  
 Training entrypoint: **`train/modal_app.py`** (not `data/scripts/modal_broad_app.py`, which is the data pipeline).
+
+**GPU:** **L4** only (24GB). Probe at ~21 s/step; full run ~750 steps ≈ 4–5 h. Adapters saved to volume `structsvg-outputs` under `e4b_broad/checkpoint_pct_XXX/`.
+
+**Eval timing:** Training and eval are **separate**. `--task train` only writes LoRA adapters. Run `--task infer` per checkpoint/bench, or `--task sweep` after train to generate + score all checkpoints on VFIG ID/OOD + SVG-Diagrams test sequentially.
 
 ## Training conditions (v0)
 

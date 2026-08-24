@@ -12,7 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from train.checkpoint_utils import CheckpointPctCallback, estimate_total_steps, pct_to_steps
+from train.checkpoint_utils import CheckpointPctCallback, SampleProgressCallback, estimate_total_steps, pct_to_steps
 from train.data_utils import PROMPT, build_train_example, load_manifest, resolve_image, resolve_svg
 
 
@@ -54,8 +54,14 @@ def verify_loss_mask(processor, examples: list[dict], *, max_length: int | None)
         "supervised_tokens": n_loss,
         "masked_tokens": n_masked,
         "supervised_preview": preview[:500],
-        "input_preview": tok.decode(input_ids[: min(120, len(input_ids))], skip_special_tokens=False)[:500],
     }
+
+
+def _print_loss_mask_stats(stats: dict) -> None:
+    print(f"seq_len={stats['seq_len']}")
+    print(f"supervised_tokens={stats['supervised_tokens']} masked_tokens={stats['masked_tokens']}")
+    print("supervised_preview (first SVG tokens):")
+    print(stats["supervised_preview"])
 
 
 def main():
@@ -91,6 +97,9 @@ def main():
 
     # UTF-8 required for TRL chat templates on Windows
     os.environ.setdefault("PYTHONUTF8", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
 
     from datasets import Dataset
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -143,7 +152,7 @@ def main():
 
     if args.verify_loss_mask:
         stats = verify_loss_mask(processor, train_records, max_length=max_length)
-        print(json.dumps(stats, indent=2))
+        _print_loss_mask_stats(stats)
         if stats["supervised_tokens"] <= 0:
             raise SystemExit("loss mask gate FAILED: no supervised tokens")
         print("loss mask gate OK")
@@ -182,10 +191,17 @@ def main():
         dataloader_pin_memory=tcfg.get("dataloader_pin_memory", False),
     )
 
+    n_samples = len(train_dataset)
+    progress_interval = max(1, n_samples // 20)  # ~20 status lines per epoch on 2k data
     ckpt_cb = CheckpointPctCallback(
         checkpoints_pct=checkpoints_pct,
         total_steps=total_steps,
         output_dir=tcfg["output_dir"],
+    )
+    progress_cb = SampleProgressCallback(
+        n_samples=n_samples,
+        num_epochs=float(tcfg.get("num_train_epochs", 1)),
+        interval=progress_interval,
     )
 
     trainer = SFTTrainer(
@@ -193,7 +209,7 @@ def main():
         args=sft_args,
         train_dataset=train_dataset,
         processing_class=processor,
-        callbacks=[ckpt_cb],
+        callbacks=[ckpt_cb, progress_cb],
     )
     ckpt_cb.bind_trainer(trainer)
 
@@ -211,6 +227,11 @@ def main():
     final_dir = Path(tcfg["output_dir"]) / "final"
     trainer.save_model(str(final_dir))
     print(f"training complete; final adapter at {final_dir}")
+    import torch
+
+    if torch.cuda.is_available():
+        peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        print(f"PEAK_VRAM_GB={peak_gb:.2f}", flush=True)
 
 
 if __name__ == "__main__":

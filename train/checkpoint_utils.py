@@ -91,3 +91,34 @@ class CheckpointPctCallback(TrainerCallback):
             final_step = int(state.global_step)
             if not any(e.get("pct") == 100 for e in self.manifest):
                 self._save(100, final_step, tag="final")
+
+
+class SampleProgressCallback(TrainerCallback):
+    """Print one status line every `interval` training examples (image→SVG rows seen)."""
+
+    def __init__(self, *, n_samples: int, num_epochs: float, interval: int = 100):
+        self.n_samples = n_samples
+        self.num_epochs = num_epochs
+        self.interval = max(1, interval)
+        self.total_examples = max(1, int(n_samples * num_epochs))
+        self._next_milestone = self.interval
+
+    def on_step_end(self, args, state, control, **kwargs):
+        effective = max(
+            1,
+            args.per_device_train_batch_size * args.gradient_accumulation_steps,
+        )
+        seen = int(state.global_step) * effective
+        if seen < self._next_milestone:
+            return
+        while seen >= self._next_milestone:
+            loss = None
+            if state.log_history:
+                loss = state.log_history[-1].get("loss")
+            epoch = state.log_history[-1].get("epoch") if state.log_history else "?"
+            print(
+                f"[train] examples {self._next_milestone}/{self.total_examples} "
+                f"step {state.global_step} epoch {epoch} loss={loss}",
+                flush=True,
+            )
+            self._next_milestone += self.interval
