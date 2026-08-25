@@ -8,9 +8,14 @@ app = modal.App("structsvg-sft")
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 vol_hf = modal.Volume.from_name("structsvg-hf-cache", create_if_missing=True)
+vol_data = modal.Volume.from_name("structsvg-data", create_if_missing=True)
 vol_out = modal.Volume.from_name("structsvg-outputs", create_if_missing=True)
 
-VOLUME_MOUNTS = {"/vol/hf": vol_hf, "/vol/out": vol_out}
+VOLUME_MOUNTS = {
+    "/vol/hf": vol_hf,
+    "/vol/data": vol_data,
+    "/vol/out": vol_out,
+}
 DATA_ROOT = "/root/data"
 
 _TRAIN_ENV = {
@@ -73,6 +78,33 @@ def _is_train_status_line(line: str) -> bool:
     if any(m in s for m in error_markers):
         return True
     return False
+
+
+def _is_sweep_status_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return False
+    if s.startswith("\r"):
+        return False
+    if "Loading weights:" in s and "checkpoint_infer" not in s:
+        return False
+    if "%|" in s and "checkpoint_infer" not in s:
+        return False
+    if s.startswith("$") or s.startswith("[sweep]"):
+        return True
+    sweep_markers = (
+        "checkpoint_infer:",
+        "loading ",
+        "wrote ",
+        "skip missing",
+        "generated ",
+        "Traceback",
+        "Error",
+        "Exception",
+        "RuntimeError",
+        "CUDA out of memory",
+    )
+    return any(m in s for m in sweep_markers)
 
 
 def _print_task_result(result: dict) -> None:
@@ -142,12 +174,8 @@ if modal.is_local():
         .add_local_dir(str(_repo / "eval"), remote_path="/root/eval")
         .add_local_dir(str(_repo / "data" / "scripts"), remote_path="/root/data/scripts")
     )
-    _broad = _repo / "data" / "processed" / "svg_diagrams"
-    if _broad.exists() and (_broad / "train_manifest.jsonl").exists():
-        image = image.add_local_dir(
-            str(_broad),
-            remote_path=f"{DATA_ROOT}/processed/svg_diagrams",
-        )
+    # Broad train pngs/svgs live on structsvg-data volume (/vol/data/processed/svg_diagrams).
+    # Do not bake svg_diagrams into the image — it re-uploads ~4k files on every modal run.
     _vfig = _repo / "data" / "processed" / "vfig_bench"
     if _vfig.exists() and (_vfig / "id_manifest.jsonl").exists():
         image = image.add_local_dir(str(_vfig), remote_path=f"{DATA_ROOT}/processed/vfig_bench")
@@ -166,10 +194,10 @@ def _resolve_train_config(cfg: dict, *, manifest_override: str | None = None) ->
     else:
         local_manifest = Path(cfg["data"]["manifest"])
         vol_candidates = [
+            Path("/vol/data") / "processed" / "svg_diagrams" / "train_manifest.jsonl",
+            Path("/vol/data") / local_manifest.as_posix().lstrip("/"),
             Path(DATA_ROOT) / "processed" / "svg_diagrams" / "train_manifest.jsonl",
             Path(DATA_ROOT) / local_manifest.as_posix().lstrip("/"),
-            Path("/vol/data") / local_manifest.as_posix().lstrip("/"),
-            Path("/vol/data") / "processed" / "svg_diagrams" / "train_manifest.jsonl",
         ]
         for cand in vol_candidates:
             if cand.exists():
@@ -646,15 +674,23 @@ def sweep_remote(
     from collections import deque
 
     status_lines: deque[str] = deque(maxlen=20)
+    raw_tail: deque[str] = deque(maxlen=40)
     assert proc.stdout is not None
     for line in proc.stdout:
-        if _is_train_status_line(line) or line.strip().startswith("$"):
-            line = line.rstrip("\n")
-            status_lines.append(line)
-            print(line, flush=True)
+        s = line.rstrip("\n")
+        raw_tail.append(s)
+        if _is_sweep_status_line(line):
+            status_lines.append(s)
+            print(s, flush=True)
     proc.wait()
     vol_out.commit()
-    return {"ok": proc.returncode == 0, "returncode": proc.returncode, "status_tail": list(status_lines)}
+    ok = proc.returncode == 0
+    return {
+        "ok": ok,
+        "returncode": proc.returncode,
+        "status_tail": list(status_lines),
+        "error_tail": list(raw_tail) if not ok else [],
+    }
 
 
 @app.local_entrypoint()

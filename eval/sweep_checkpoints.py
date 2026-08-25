@@ -22,9 +22,23 @@ BENCHES = {
 }
 
 
-def _run(cmd: list[str]) -> None:
-    print("$", " ".join(cmd))
+def _run_eval(manifest: Path, preds: Path, out: Path, split: str) -> dict:
+    cmd = [
+        sys.executable,
+        "-m",
+        "eval.run_bench_eval",
+        "--manifest",
+        str(manifest),
+        "--preds",
+        str(preds),
+        "--out",
+        str(out),
+        "--split",
+        split if split != "test" else "all",
+    ]
+    print("$", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
+    return json.loads(out.read_text(encoding="utf-8"))
 
 
 def main():
@@ -34,11 +48,23 @@ def main():
     ap.add_argument("--max-samples", type=int, default=None)
     ap.add_argument("--pcts", default="0,5,10,20,40,60,80,100")
     ap.add_argument("--out-dir", type=Path, default=_OUT / "metrics" / "sweep")
+    ap.add_argument("--config", type=Path, default=ROOT / "configs" / "model_e4b.yaml")
+    ap.add_argument("--skip-existing", action="store_true", help="skip gen if preds file exists")
     args = ap.parse_args()
+
+    from train.infer_engine import InferEngine, load_bench_manifests
 
     pcts = [int(x) for x in args.pcts.split(",")]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     curves = {"pcts": pcts, "validity": [], "ssim": [], "dino_cosine": [], "by_bench": {}}
+
+    benches = load_bench_manifests(BENCHES, data_root=_DATA, repo_root=ROOT, max_samples=args.max_samples)
+    image_cache = {
+        name: InferEngine.preload_rows(rows, log_prefix=f"{name} ")
+        for name, (rows, _man, _split) in benches.items()
+    }
+
+    engine = InferEngine(args.config)
 
     for pct in pcts:
         if pct == 0:
@@ -48,57 +74,32 @@ def main():
             adapter = args.adapter_root / f"checkpoint_pct_{pct:03d}"
             tag = f"pct_{pct:03d}"
         if adapter is not None and not adapter.exists():
-            print(f"skip missing {adapter}")
+            print(f"skip missing {adapter}", flush=True)
             continue
+
+        engine.set_adapter(adapter, tag=tag)
 
         pct_validity = []
         pct_ssim = []
         pct_dino = []
         curves["by_bench"][tag] = {}
 
-        for bench_name, (man_rel, split) in BENCHES.items():
-            man = _DATA / Path(man_rel).relative_to("data") if str(man_rel).startswith("data/") else ROOT / man_rel
-            if not man.exists():
-                man = ROOT / man_rel
-            if not man.exists():
-                print(f"skip missing manifest {man}")
-                continue
+        for bench_name, (_rows, man, split) in benches.items():
             gen_out = _OUT / "generations" / "sweep" / f"{bench_name}_{tag}_{args.protocol}.jsonl"
             gen_out.parent.mkdir(parents=True, exist_ok=True)
-            cmd = [
-                sys.executable,
-                "-m",
-                "train.checkpoint_infer",
-                "--manifest",
-                str(man),
-                "--out",
-                str(gen_out),
-                "--protocol",
-                args.protocol,
-            ]
-            if adapter:
-                cmd.extend(["--adapter", str(adapter)])
-            if args.max_samples:
-                cmd.extend(["--max-samples", str(args.max_samples)])
-            _run(cmd)
+            if args.skip_existing and gen_out.exists() and gen_out.stat().st_size > 0:
+                print(f"skip existing {gen_out}", flush=True)
+            else:
+                rows, _, _ = benches[bench_name]
+                engine.generate_manifest(
+                    rows,
+                    out=gen_out,
+                    protocol=args.protocol,
+                    cached=image_cache[bench_name],
+                )
 
             met_out = args.out_dir / f"{bench_name}_{tag}.json"
-            _run(
-                [
-                    sys.executable,
-                    "-m",
-                    "eval.run_bench_eval",
-                    "--manifest",
-                    str(man),
-                    "--preds",
-                    str(gen_out),
-                    "--out",
-                    str(met_out),
-                    "--split",
-                    split if split != "test" else "all",
-                ]
-            )
-            rep = json.loads(met_out.read_text(encoding="utf-8"))
+            rep = _run_eval(man, gen_out, met_out, split)
             curves["by_bench"][tag][bench_name] = rep["aggregate"]
             if bench_name == "vfig_id":
                 pct_validity.append(rep["aggregate"].get("validity"))
@@ -118,9 +119,19 @@ def main():
         "by_bench": curves["by_bench"],
     }
     curves_path.write_text(json.dumps(curves_for_plot, indent=2), encoding="utf-8")
-    print(f"wrote {curves_path}")
+    print(f"wrote {curves_path}", flush=True)
 
-    _run([sys.executable, "-m", "eval.checkpoint_curves", "--curves", str(curves_path), "--out", str(args.out_dir / f"emergence_{args.protocol}.json")])
+    cmd = [
+        sys.executable,
+        "-m",
+        "eval.checkpoint_curves",
+        "--curves",
+        str(curves_path),
+        "--out",
+        str(args.out_dir / f"emergence_{args.protocol}.json"),
+    ]
+    print("$", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
 
 
 def mean_or_nan(xs):
