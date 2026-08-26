@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from pathlib import Path
 
 from PIL import Image
@@ -54,7 +55,34 @@ def _resolve_path(p: str | Path) -> Path:
     return path
 
 
-def load_manifest(path: Path, max_samples: int | None = None) -> list[dict]:
+def row_has_loadable_image(row: dict) -> bool:
+    """True if resolve_image would succeed (PNG on disk or renderable SVG)."""
+    if row.get("image_path"):
+        p = _resolve_path(row["image_path"])
+        if p.is_file():
+            return True
+    svg = row.get("svg")
+    if not svg and row.get("svg_path"):
+        p = _resolve_path(row["svg_path"])
+        if not p.is_file():
+            return False
+        svg = p.read_text(encoding="utf-8")
+    if not svg:
+        return False
+    try:
+        render_pil(svg, size=TRAIN_RENDER_LONG_EDGE)
+        return True
+    except Exception:
+        return False
+
+
+def load_manifest(
+    path: Path,
+    max_samples: int | None = None,
+    *,
+    sample_seed: int | None = None,
+    require_loadable_image: bool = False,
+) -> list[dict]:
     rows = []
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -62,8 +90,32 @@ def load_manifest(path: Path, max_samples: int | None = None) -> list[dict]:
             if not line:
                 continue
             rows.append(json.loads(line))
-            if max_samples and len(rows) >= max_samples:
-                break
+
+    if require_loadable_image:
+        before = len(rows)
+        rows = [r for r in rows if row_has_loadable_image(r)]
+        print(
+            f"load_manifest: {path.name} loadable {len(rows)}/{before}",
+            flush=True,
+        )
+
+    if max_samples is not None and sample_seed is not None:
+        rows.sort(key=lambda r: str(r.get("id", "")))
+        rng = random.Random(sample_seed)
+        indices = list(range(len(rows)))
+        rng.shuffle(indices)
+        pick = sorted(indices[:max_samples], key=lambda i: rows[i].get("id", ""))
+        rows = [rows[i] for i in pick]
+    elif max_samples:
+        rows = rows[:max_samples]
+
+    if max_samples is not None and sample_seed is not None:
+        print(
+            f"load_manifest: {path.name} selected n={len(rows)} seed={sample_seed}"
+            + (f" ids={[r.get('id') for r in rows[:3]]}..." if rows else ""),
+            flush=True,
+        )
+
     return rows
 
 

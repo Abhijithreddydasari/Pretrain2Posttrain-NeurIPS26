@@ -11,15 +11,45 @@ from transformers import StoppingCriteria, StoppingCriteriaList
 from train.data_utils import load_manifest, resolve_image
 
 
-class _StopOnSubstring(StoppingCriteria):
-    def __init__(self, tokenizer, start_len: int, stop: str):
-        self.tokenizer = tokenizer
-        self.start_len = start_len
-        self.stop = stop.lower()
+def _tokenizer(processor):
+    return getattr(processor, "tokenizer", processor)
+
+
+def _stop_token_suffixes(tokenizer) -> list[list[int]]:
+    """Token-id suffixes for early stop (no per-step decode)."""
+    seen: set[tuple[int, ...]] = set()
+    suffixes: list[list[int]] = []
+    for text in ("</svg>", "</SVG>", "</svg>\n", "</svg></svg>", "```"):
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        key = tuple(ids)
+        if ids and key not in seen:
+            seen.add(key)
+            suffixes.append(ids)
+    return suffixes
+
+
+class _StopOnTokenSuffixes(StoppingCriteria):
+    """Fast suffix check on token ids — avoids decode-every-step slowdown."""
+
+    def __init__(self, suffixes: list[list[int]]):
+        self.suffixes = suffixes
 
     def __call__(self, input_ids, scores, **kwargs) -> bool:
-        text = self.tokenizer.decode(input_ids[0, self.start_len :], skip_special_tokens=True).lower()
-        return self.stop in text
+        seq = input_ids[0].tolist()
+        for suf in self.suffixes:
+            n = len(suf)
+            if len(seq) >= n and seq[-n:] == suf:
+                return True
+        return False
+
+
+def _truncate_at_svg_close(text: str) -> str:
+    """Keep through first closing root tag if model ran past it."""
+    lower = text.lower()
+    idx = lower.find("</svg>")
+    if idx >= 0:
+        return text[: idx + len("</svg>")]
+    return text
 
 
 def _resolve_manifest(path: Path, data_root: Path, repo_root: Path) -> Path:
@@ -29,10 +59,6 @@ def _resolve_manifest(path: Path, data_root: Path, repo_root: Path) -> Path:
         if cand.exists():
             return cand
     return path
-
-
-def _tokenizer(processor):
-    return getattr(processor, "tokenizer", processor)
 
 
 class InferEngine:
@@ -61,7 +87,13 @@ class InferEngine:
         self.model = self.base_model
         self._peft = False
         self._adapter_tag: str | None = None
-        print(f"infer_engine: base ready via {self.loader} in {time.perf_counter() - t0:.1f}s", flush=True)
+        tok = _tokenizer(self.processor)
+        self._stop_suffixes = _stop_token_suffixes(tok)
+        print(
+            f"infer_engine: base ready via {self.loader} in {time.perf_counter() - t0:.1f}s "
+            f"stop_suffixes={len(self._stop_suffixes)}",
+            flush=True,
+        )
 
     def set_adapter(self, adapter: Path | None, *, tag: str) -> None:
         import torch
@@ -106,7 +138,7 @@ class InferEngine:
         print(f"infer_engine: {log_prefix}image cache ready in {time.perf_counter() - t0:.1f}s", flush=True)
         return out
 
-    def _generate_one(self, image, protocol: str) -> tuple[str, int, int]:
+    def _generate_one(self, image, protocol: str) -> tuple[str, int, int, float]:
         import torch
 
         messages = [
@@ -125,24 +157,29 @@ class InferEngine:
         input_len = int(inputs["input_ids"].shape[-1])
 
         tok = _tokenizer(self.processor)
-        stop = StoppingCriteriaList([_StopOnSubstring(tok, input_len, "</svg>")])
-        max_new = int(self.gen_cfg.get("max_new_tokens", 2048))
+        stop = StoppingCriteriaList([_StopOnTokenSuffixes(self._stop_suffixes)])
+        max_new = int(self.gen_cfg.get("max_new_tokens", 1536))
+
+        gen_kwargs: dict = {
+            "max_new_tokens": max_new,
+            "do_sample": bool(self.gen_cfg.get("do_sample", False)),
+            "use_cache": True,
+            "stopping_criteria": stop,
+            "pad_token_id": getattr(tok, "pad_token_id", None) or getattr(tok, "eos_token_id", None),
+        }
+        if self.gen_cfg.get("max_time") is not None:
+            gen_kwargs["max_time"] = float(self.gen_cfg["max_time"])
 
         t0 = time.perf_counter()
         with torch.inference_mode():
-            out_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new,
-                do_sample=bool(self.gen_cfg.get("do_sample", False)),
-                use_cache=True,
-                no_repeat_ngram_size=3,
-                stopping_criteria=stop,
-                pad_token_id=getattr(tok, "pad_token_id", None) or getattr(tok, "eos_token_id", None),
-            )
+            out_ids = self.model.generate(**inputs, **gen_kwargs)
         new_ids = out_ids[0, input_len:]
         decoded = self.processor.decode(new_ids, skip_special_tokens=True)
+        decoded = _truncate_at_svg_close(decoded)
+        if protocol == "svg_prefix":
+            decoded = self.prefix + decoded
         elapsed = time.perf_counter() - t0
-        return decoded, input_len, int(new_ids.shape[0])
+        return decoded, input_len, int(new_ids.shape[0]), elapsed
 
     def generate_manifest(
         self,
@@ -157,13 +194,13 @@ class InferEngine:
         n = 0
         with out.open("w", encoding="utf-8") as f:
             for row, image in pairs:
-                pred, input_len, new_toks = self._generate_one(image, protocol)
+                pred, input_len, new_toks, elapsed = self._generate_one(image, protocol)
                 f.write(json.dumps({"id": row["id"], "pred_text": pred, "protocol": protocol}) + "\n")
                 f.flush()
                 n += 1
                 print(
                     f"generated {row['id']} input_tokens={input_len} new_tokens={new_toks} "
-                    f"adapter={self._adapter_tag}",
+                    f"sec={elapsed:.1f} adapter={self._adapter_tag}",
                     flush=True,
                 )
         print(f"wrote {n} preds → {out}", flush=True)
@@ -176,6 +213,8 @@ def load_bench_manifests(
     data_root: Path,
     repo_root: Path,
     max_samples: int | None,
+    sample_seed: int | None = 42,
+    require_loadable_image: bool = True,
 ) -> dict[str, tuple[list[dict], Path, str]]:
     loaded: dict[str, tuple[list[dict], Path, str]] = {}
     for bench_name, (man_rel, split) in benches.items():
@@ -183,7 +222,12 @@ def load_bench_manifests(
         if not man.exists():
             print(f"skip missing manifest {man}", flush=True)
             continue
-        rows = load_manifest(man, max_samples)
+        rows = load_manifest(
+            man,
+            max_samples,
+            sample_seed=sample_seed,
+            require_loadable_image=require_loadable_image,
+        )
         loaded[bench_name] = (rows, man, split)
         print(f"infer_engine: bench {bench_name} rows={len(rows)} manifest={man}", flush=True)
     return loaded

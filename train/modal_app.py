@@ -638,7 +638,7 @@ def infer_remote(
 
 @app.function(
     image=image,
-    gpu="L4",
+    gpu="A100-80GB",
     timeout=24 * 60 * 60,
     secrets=[hf_secret],
     volumes=VOLUME_MOUNTS,
@@ -649,6 +649,10 @@ def sweep_remote(
     protocol: str = "prompt",
     pcts: str = "0,5,10,20,40,60,80,100",
     max_samples: int | None = None,
+    skip_existing: bool = False,
+    sample_seed: int = 42,
+    benches: str = "",
+    gen_only: bool = False,
 ):
     import subprocess
     import sys
@@ -669,6 +673,13 @@ def sweep_remote(
     ]
     if max_samples:
         cmd.extend(["--max-samples", str(max_samples)])
+    if skip_existing:
+        cmd.append("--skip-existing")
+    if gen_only:
+        cmd.append("--gen-only")
+    if benches:
+        cmd.extend(["--benches", benches])
+    cmd.extend(["--sample-seed", str(sample_seed)])
     print("[sweep]", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     from collections import deque
@@ -702,6 +713,11 @@ def main(
     adapter: str = "",
     protocol: str = "prompt",
     max_samples: int = 0,
+    pcts: str = "0,5,10,20,40,60,80,100",
+    skip_existing: bool = False,
+    sample_seed: int = 42,
+    benches: str = "",
+    gen_only: bool = False,
 ):
     ms = max_samples if max_samples > 0 else None
     if task == "smoke":
@@ -722,6 +738,16 @@ def main(
         ap = adapter or None
         _print_task_result(infer_remote.remote(manifest, out, adapter_path=ap, protocol=protocol, max_samples=ms))
     elif task == "sweep":
-        _print_task_result(sweep_remote.remote(protocol=protocol, max_samples=ms))
+        _print_task_result(
+            sweep_remote.remote(
+                protocol=protocol,
+                max_samples=ms,
+                pcts=pcts,
+                skip_existing=skip_existing,
+                sample_seed=sample_seed,
+                benches=benches,
+                gen_only=gen_only,
+            )
+        )
     else:
         raise SystemExit(f"unknown task {task}")
