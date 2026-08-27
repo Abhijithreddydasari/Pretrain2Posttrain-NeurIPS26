@@ -65,6 +65,8 @@ def main():
         default="",
         help="comma-separated bench keys (default: all). e.g. vfig_id or vfig_id,vfig_ood",
     )
+    ap.add_argument("--backend", choices=["hf", "vllm"], default="hf")
+    ap.add_argument("--batch-size", type=int, default=8, help="vLLM batch size (ignored for hf)")
     args = ap.parse_args()
 
     bench_map = BENCHES
@@ -77,8 +79,16 @@ def main():
 
     from train.infer_engine import InferEngine, load_bench_manifests
 
+    if args.backend == "vllm":
+        from train.vllm_infer import VllmInferEngine
+
+        engine = VllmInferEngine(args.config, batch_size=args.batch_size)
+        preload_rows = VllmInferEngine.preload_rows
+    else:
+        engine = InferEngine(args.config)
+        preload_rows = InferEngine.preload_rows
     pcts = [int(x) for x in args.pcts.split(",")]
-    args.out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"sweep backend={args.backend} adapter_root={args.adapter_root}", flush=True)
     curves = {
         "pcts": pcts,
         "sample_seed": args.sample_seed,
@@ -106,11 +116,11 @@ def main():
         subset_manifests[bench_name] = subset_path
         print(f"wrote eval subset {subset_path} ({len(rows)} rows)", flush=True)
     image_cache = {
-        name: InferEngine.preload_rows(rows, log_prefix=f"{name} ")
+        name: preload_rows(rows, log_prefix=f"{name} ")
         for name, (rows, _man, _split) in benches.items()
     }
 
-    engine = InferEngine(args.config)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
 
     for pct in pcts:
         if pct == 0:

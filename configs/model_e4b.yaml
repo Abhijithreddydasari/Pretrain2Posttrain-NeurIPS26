@@ -7,12 +7,16 @@ torch_dtype: bfloat16
 attn_implementation: sdpa
 use_base_not_it: true
 max_soft_tokens: 560
+max_model_len: 4096
+lora:
+  r: 16
 prompt_template: |
-  Reconstruct the diagram as a single canonical SVG.
-  Use viewBox="0 0 512 512". Output only SVG markup.
+  Reconstruct the diagram as one complete native SVG.
+  Use viewBox="{viewbox}" and preserve the diagram's aspect ratio, layout, text, shapes, and connections.
+  Output only SVG markup. End with </svg>.
 svg_prefix_scaffold: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">"
 generation:
   max_new_tokens: 1536
   max_time: 90
   do_sample: false
-  temperature: 1.0
+  temperature: 0.0

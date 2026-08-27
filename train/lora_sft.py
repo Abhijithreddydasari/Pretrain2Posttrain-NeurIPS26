@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -82,6 +83,76 @@ def _print_loss_mask_stats(stats: dict) -> None:
     print(stats["supervised_preview"])
 
 
+def filter_records_to_token_budget(
+    processor,
+    records: list[dict],
+    *,
+    max_length: int,
+    log_fn=_status,
+) -> tuple[list[dict], list[dict]]:
+    """Keep only complete examples that fit; never train on a cut SVG tail."""
+    from trl.trainer.sft_trainer import DataCollatorForVisionLanguageModeling
+
+    collator = DataCollatorForVisionLanguageModeling(
+        processor=processor,
+        max_length=None,
+        completion_only_loss=True,
+    )
+    tokenizer = getattr(processor, "tokenizer", processor)
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for i, record in enumerate(records):
+        # TRL's multimodal collator mutates prompt messages in-place while
+        # inserting image objects. Audit a copy so the real training record
+        # still contains exactly one image placeholder.
+        audit_record = {
+            **record,
+            "images": list(record["images"]),
+            "prompt": copy.deepcopy(record["prompt"]),
+            "completion": copy.deepcopy(record["completion"]),
+        }
+        batch = collator([audit_record])
+        labels = batch["labels"][0]
+        seq_len = int(batch["attention_mask"][0].sum().item())
+        supervised = labels[labels != -100]
+        tail = tokenizer.decode(supervised[-32:], skip_special_tokens=False)
+        # Gemma chat templates may decode the turn terminator differently
+        # across processor versions. `</svg>` is the invariant task boundary;
+        # separately record whether a recognized special turn token is present.
+        has_svg_close = "</svg>" in tail.lower()
+        turn_token_ids = {
+            token_id
+            for token_id in (
+                tokenizer.convert_tokens_to_ids("<end_of_turn>"),
+                getattr(tokenizer, "eos_token_id", None),
+            )
+            if isinstance(token_id, int) and token_id >= 0
+        }
+        supervised_ids = set(supervised.tolist())
+        has_turn_stop = bool(turn_token_ids & supervised_ids) or "<turn|>" in tail
+        complete = has_svg_close and has_turn_stop
+        if seq_len <= max_length and complete:
+            kept.append(record)
+        else:
+            dropped.append(
+                {
+                    "id": record.get("id"),
+                    "seq_len": seq_len,
+                    "max_length": max_length,
+                    "complete_tail": complete,
+                    "has_svg_close": has_svg_close,
+                    "has_turn_stop": has_turn_stop,
+                    "tail": tail[-300:],
+                }
+            )
+        if (i + 1) % 100 == 0 or i + 1 == len(records):
+            log_fn(
+                f"token-budget audit {i + 1}/{len(records)} "
+                f"kept={len(kept)} dropped={len(dropped)}"
+            )
+    return kept, dropped
+
+
 def _setup_train_env() -> None:
     os.environ.setdefault("PYTHONUTF8", "1")
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
@@ -129,8 +200,28 @@ def main():
 
     prompt = cfg.get("prompt_template", PROMPT).strip()
     tcfg = cfg["train"]
+    max_length = int(tcfg.get("max_seq_length", 4096))
 
-    # Cache PNG+SVG in RAM *before* loading the 8B model (single disk read; reused all epochs).
+    # Load the processor first so the token-budget gate uses the exact training
+    # chat template/tokenization. Model weights are loaded only after data passes.
+    from train.model_load import ensure_chat_template
+    from transformers import AutoProcessor
+
+    model_id = cfg["model_id"]
+    if cfg.get("use_base_not_it") and model_id.endswith("-it"):
+        raise ValueError("Refusing instruct checkpoint while use_base_not_it=true")
+    _status(f"loading processor for exact {max_length}-token budget audit...")
+    audit_processor = AutoProcessor.from_pretrained(
+        model_id,
+        trust_remote_code=cfg.get("trust_remote_code", True),
+    )
+    audit_processor = ensure_chat_template(
+        audit_processor,
+        model_id,
+        trust_remote_code=cfg.get("trust_remote_code", True),
+    )
+
+    # Cache PNG+SVG in RAM once; reused for the token gate and all epochs.
     if args.verify_loss_mask:
         _status("building 8 examples for loss-mask gate...")
         train_records = materialize_train_examples(rows[:8], prompt=prompt, log_fn=_status, log_every=8)
@@ -142,14 +233,52 @@ def main():
         train_dataset = Dataset.from_list(train_records)
         _status(f"dataset cached in RAM ({len(train_records)} rows; no per-epoch disk reload)")
 
+    dropped_records: list[dict] = []
+    if cfg["data"].get("match_token_budget", False):
+        _status(f"enforcing complete-example token budget max_length={max_length}...")
+        train_records, dropped_records = filter_records_to_token_budget(
+            audit_processor,
+            train_records,
+            max_length=max_length,
+        )
+        budget_report = {
+            "max_length": max_length,
+            "input_rows": len(rows[:8]) if args.verify_loss_mask else len(rows),
+            "kept": len(train_records),
+            "dropped": len(dropped_records),
+            "dropped_rows": dropped_records,
+        }
+        out_meta.joinpath("token_budget_report.json").write_text(
+            json.dumps(budget_report, indent=2),
+            encoding="utf-8",
+        )
+        _status(
+            f"token-budget gate kept={len(train_records)} dropped={len(dropped_records)} "
+            f"report={out_meta / 'token_budget_report.json'}"
+        )
+        if dropped_records:
+            first = dropped_records[0]
+            _status(
+                "first dropped row: "
+                f"id={first['id']} seq_len={first['seq_len']} "
+                f"svg_close={first['has_svg_close']} turn_stop={first['has_turn_stop']} "
+                f"tail={first['tail']!r}"
+            )
+        if not train_records:
+            raise SystemExit("token-budget gate FAILED: no complete examples fit")
+        if not args.verify_loss_mask:
+            from datasets import Dataset
+
+            train_dataset = Dataset.from_list(train_records)
+
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
     from trl import SFTConfig, SFTTrainer
 
     from train.model_load import load_vlm
 
-    model_id = cfg["model_id"]
-    if cfg.get("use_base_not_it") and model_id.endswith("-it"):
-        raise ValueError("Refusing instruct checkpoint while use_base_not_it=true")
+    # load_vlm returns the processor used by training; release the audit-only
+    # copy before loading model weights to keep host RAM predictable.
+    del audit_processor
 
     _status(f"loading model {model_id} once (bf16={not cfg.get('load_in_4bit', False)})...")
     processor, model, loader = load_vlm(
@@ -178,7 +307,6 @@ def main():
     model = get_peft_model(model, peft_cfg)
     model.print_trainable_parameters()
 
-    max_length = tcfg.get("max_seq_length", 4096)
     grad_ckpt = bool(tcfg.get("gradient_checkpointing", True))
     num_workers = int(tcfg.get("dataloader_num_workers", 0))
     if torch.cuda.is_available() and num_workers > 0:

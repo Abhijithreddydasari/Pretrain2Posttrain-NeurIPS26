@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -44,6 +45,14 @@ def _resolve_path(p: str | Path) -> Path:
         alt3 = _REPO_ROOT / rel
         if alt3.exists():
             return alt3
+        # Modal processed-data volume layout:
+        # /vol/data/processed/... (manifest rows remain repo-relative data/processed/...).
+        vol_alt = Path("/vol/data") / Path(*rel.parts[1:])
+        if vol_alt.exists():
+            return vol_alt
+        vol_repo_alt = Path("/vol/data") / rel
+        if vol_repo_alt.exists():
+            return vol_repo_alt
     if _DATA_ROOT is not None:
         alt = _DATA_ROOT / path.as_posix().lstrip("/")
         if alt.exists():
@@ -140,15 +149,40 @@ def resolve_svg(row: dict) -> str:
 
 
 PROMPT = (
-    "Reconstruct the diagram as a single canonical SVG. "
-    'Use viewBox="0 0 512 512". Output only SVG markup.'
+    "Reconstruct the diagram as one complete native SVG. "
+    'Use viewBox="{viewbox}" and preserve the diagram\'s aspect ratio, layout, text, '
+    "shapes, and connections. Output only SVG markup. End with </svg>."
 )
+
+
+def canvas_viewbox(row: dict, *, image: Image.Image | None = None) -> str:
+    """Native gold viewBox; image dimensions only when no gold SVG exists."""
+    try:
+        svg = resolve_svg(row)
+    except (FileNotFoundError, KeyError):
+        svg = ""
+    match = re.search(r'\bviewBox\s*=\s*["\']([^"\']+)["\']', svg[:4000], re.IGNORECASE)
+    if match:
+        parts = re.split(r"[\s,]+", match.group(1).strip())
+        if len(parts) == 4:
+            return " ".join(parts)
+    if image is None:
+        image = resolve_image(row)
+    width, height = image.size
+    return f"0 0 {width} {height}"
+
+
+def prompt_for_row(row: dict, template: str = PROMPT, *, image: Image.Image | None = None) -> str:
+    """Fill a canvas-conditioned prompt without changing target coordinates."""
+    viewbox = canvas_viewbox(row, image=image)
+    return template.format(viewbox=viewbox)
 
 
 def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
     """Prompt-completion record for TRL VLM SFT (completion_only_loss masks prompt)."""
     img = resolve_image(row)
     svg = resolve_svg(row)
+    row_prompt = prompt_for_row(row, prompt, image=img)
     # TRL collator injects images from `images`; prompt uses placeholders only.
     return {
         "id": row.get("id"),
@@ -158,7 +192,7 @@ def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
                 "role": "user",
                 "content": [
                     {"type": "image"},
-                    {"type": "text", "text": prompt},
+                    {"type": "text", "text": row_prompt},
                 ],
             }
         ],

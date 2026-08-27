@@ -1,0 +1,50 @@
+model_id: google/gemma-4-E4B
+revision: main
+trust_remote_code: true
+torch_dtype: bfloat16
+load_in_4bit: false
+attn_implementation: sdpa
+use_base_not_it: true
+
+prompt_template: |
+  Reconstruct the diagram as one complete native SVG.
+  Use viewBox="{viewbox}" and preserve the diagram's aspect ratio, layout, text, shapes, and connections.
+  Output only SVG markup. End with </svg>.
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: all-linear
+  bias: none
+  task_type: CAUSAL_LM
+
+train:
+  output_dir: outputs/e4b_broad_v2
+  num_train_epochs: 2
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-4
+  logging_steps: 10
+  max_seq_length: 8192
+  optim: adamw_torch
+  bf16: true
+  gradient_checkpointing: true
+  dataloader_pin_memory: true
+  dataloader_num_workers: 0
+  remove_unused_columns: false
+  report_to: none
+  seed: 42
+
+data:
+  manifest: data/processed/svg_diagrams/train_manifest.jsonl
+  max_samples: 2000
+  # Exact processor/collator gate: keep only examples whose complete
+  # image+prompt+SVG+</svg><end_of_turn> sequence fits max_seq_length.
+  match_token_budget: true
+
+checkpoints_pct: [0, 5, 10, 20, 40, 60, 80, 100]
+
+eval:
+  after_train: true
+  splits: [id, ood]

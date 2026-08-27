@@ -8,7 +8,7 @@ from pathlib import Path
 import yaml
 from transformers import StoppingCriteria, StoppingCriteriaList
 
-from train.data_utils import load_manifest, resolve_image
+from train.data_utils import load_manifest, prompt_for_row, resolve_image
 
 
 def _tokenizer(processor):
@@ -138,15 +138,16 @@ class InferEngine:
         print(f"infer_engine: {log_prefix}image cache ready in {time.perf_counter() - t0:.1f}s", flush=True)
         return out
 
-    def _generate_one(self, image, protocol: str) -> tuple[str, int, int, float]:
+    def _generate_one(self, row: dict, image, protocol: str) -> tuple[str, int, int, float]:
         import torch
 
+        prompt = prompt_for_row(row, self.prompt, image=image)
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": self.prompt},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ]
@@ -159,12 +160,22 @@ class InferEngine:
         tok = _tokenizer(self.processor)
         stop = StoppingCriteriaList([_StopOnTokenSuffixes(self._stop_suffixes)])
         max_new = int(self.gen_cfg.get("max_new_tokens", 1536))
+        eos_ids = [
+            token_id
+            for token_id in (
+                getattr(tok, "eos_token_id", None),
+                tok.convert_tokens_to_ids("<end_of_turn>"),
+                tok.convert_tokens_to_ids("<turn|>"),
+            )
+            if isinstance(token_id, int) and token_id >= 0
+        ]
 
         gen_kwargs: dict = {
             "max_new_tokens": max_new,
             "do_sample": bool(self.gen_cfg.get("do_sample", False)),
             "use_cache": True,
             "stopping_criteria": stop,
+            "eos_token_id": sorted(set(eos_ids)),
             "pad_token_id": getattr(tok, "pad_token_id", None) or getattr(tok, "eos_token_id", None),
         }
         if self.gen_cfg.get("max_time") is not None:
@@ -194,7 +205,7 @@ class InferEngine:
         n = 0
         with out.open("w", encoding="utf-8") as f:
             for row, image in pairs:
-                pred, input_len, new_toks, elapsed = self._generate_one(image, protocol)
+                pred, input_len, new_toks, elapsed = self._generate_one(row, image, protocol)
                 f.write(json.dumps({"id": row["id"], "pred_text": pred, "protocol": protocol}) + "\n")
                 f.flush()
                 n += 1
