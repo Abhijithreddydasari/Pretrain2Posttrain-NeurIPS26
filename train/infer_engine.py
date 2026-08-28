@@ -29,16 +29,21 @@ def _stop_token_suffixes(tokenizer) -> list[list[int]]:
 
 
 class _StopOnTokenSuffixes(StoppingCriteria):
-    """Fast suffix check on token ids — avoids decode-every-step slowdown."""
+    """Suffix check on the last few token ids only.
+
+    Converting the whole sequence per step (``input_ids[0].tolist()``) is O(n)
+    every token and dominates decode time on long SVGs; only the tail matters.
+    """
 
     def __init__(self, suffixes: list[list[int]]):
         self.suffixes = suffixes
+        self.window = max((len(s) for s in suffixes), default=1)
 
     def __call__(self, input_ids, scores, **kwargs) -> bool:
-        seq = input_ids[0].tolist()
+        tail = input_ids[0, -self.window :].tolist()
         for suf in self.suffixes:
             n = len(suf)
-            if len(seq) >= n and seq[-n:] == suf:
+            if len(tail) >= n and tail[-n:] == suf:
                 return True
         return False
 
@@ -64,7 +69,7 @@ def _resolve_manifest(path: Path, data_root: Path, repo_root: Path) -> Path:
 class InferEngine:
     """Load E4B once; swap adapters per checkpoint; preload bench images to RAM."""
 
-    def __init__(self, config: Path):
+    def __init__(self, config: Path, *, merge_adapters: bool = True):
         import torch
 
         from train.model_load import load_vlm
@@ -86,6 +91,10 @@ class InferEngine:
         self.base_model.eval()
         self.model = self.base_model
         self._peft = False
+        self._merged = False
+        # Unmerged LoRA adds two matmuls per linear per token; merging removes
+        # that during generation. unmerge_adapter() restores base on swap.
+        self.merge_adapters = merge_adapters
         self._adapter_tag: str | None = None
         tok = _tokenizer(self.processor)
         self._stop_suffixes = _stop_token_suffixes(tok)
@@ -98,6 +107,11 @@ class InferEngine:
     def set_adapter(self, adapter: Path | None, *, tag: str) -> None:
         import torch
         from peft import PeftModel
+
+        if self._merged:
+            # Restore base weights before any adapter change.
+            self.model.unmerge_adapter()
+            self._merged = False
 
         if adapter is None:
             if self._peft:
@@ -123,6 +137,13 @@ class InferEngine:
             self.model.set_adapter(name)
             self.model.enable_adapter_layers()
             print(f"infer_engine: checkpoint {tag} adapter={name}", flush=True)
+
+        if self.merge_adapters:
+            t0 = time.perf_counter()
+            self.model.merge_adapter()
+            self._merged = True
+            print(f"infer_engine: merged adapter {name} in {time.perf_counter() - t0:.1f}s", flush=True)
+
         self._adapter_tag = tag
         torch.cuda.empty_cache()
 

@@ -16,7 +16,9 @@ prompt_template: |
   Output only SVG markup. End with </svg>.
 svg_prefix_scaffold: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">"
 generation:
-  max_new_tokens: 1536
-  max_time: 90
+  # vfig_id gold target length: p50=1828, p90=3745 tokens (outputs/metrics/token_audit.json).
+  # A 1536-token / 90 s budget guillotined every pred at ~695 tokens; do not reintroduce.
+  max_new_tokens: 4096
+  max_time: null
   do_sample: false
   temperature: 0.0

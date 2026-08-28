@@ -818,6 +818,43 @@ def _sweep_impl(
 
 
 @app.function(
+    image=image,
+    volumes=VOLUME_MOUNTS,
+    timeout=30 * 60,
+)
+def gallery_remote(
+    preds_path: str = "/vol/out/generations/sweep/vfig_id_pct_100_prompt.jsonl",
+    manifest_path: str = "/vol/out/metrics/sweep/eval_subset_vfig_id_10_seed42.jsonl",
+    out_dir: str = "/vol/out/gallery/vfig_id_pct_100",
+    title: str = "vfig_id pct_100",
+):
+    import subprocess
+    import sys
+
+    sys.path.insert(0, "/root")
+    cmd = [
+        sys.executable,
+        "-m",
+        "eval.gallery_generations_files",
+        "--preds",
+        preds_path,
+        "--manifest",
+        manifest_path,
+        "--out-dir",
+        out_dir,
+        "--title",
+        title,
+    ]
+    print("[gallery]", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(proc.stdout)
+    if proc.stderr:
+        print(proc.stderr)
+    vol_out.commit()
+    return {"ok": proc.returncode == 0, "out_dir": out_dir, "stdout": proc.stdout[-2000:]}
+
+
+@app.function(
     image=vllm_image,
     gpu="A100-80GB",
     timeout=60 * 60,
@@ -907,6 +944,8 @@ def main(
             raise SystemExit("infer requires --manifest and --out")
         ap = adapter or None
         _print_task_result(infer_remote.remote(manifest, out, adapter_path=ap, protocol=protocol, max_samples=ms))
+    elif task == "gallery":
+        _print_task_result(gallery_remote.remote())
     elif task == "vllm_smoke":
         _print_task_result(vllm_smoke.remote(adapter_root=adapter_root, max_samples=ms or 4))
     elif task == "sweep":

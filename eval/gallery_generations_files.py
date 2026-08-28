@@ -65,9 +65,12 @@ def main():
 
         pred_ref = ""
         (out_dir / f"{safe}_pred.txt").write_text(pred_text[:50000], encoding="utf-8")
-        if len(pred_blob) < 15000 and "</svg>" in pred_blob.lower():
+        render_blob = pred_blob
+        if "</svg>" not in render_blob.lower() and render_blob.lstrip().lower().startswith("<svg"):
+            render_blob = render_blob.rstrip() + "</svg>"
+        if len(render_blob) < 15000:
             try:
-                render_pil(pred_blob, size=512).save(pred_png)
+                render_pil(render_blob, size=512).save(pred_png)
                 pred_ref = pred_png.name
             except Exception:
                 pass
