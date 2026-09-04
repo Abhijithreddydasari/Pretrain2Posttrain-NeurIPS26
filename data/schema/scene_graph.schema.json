@@ -1,6 +1,0 @@
-{
-  "grammar": "workflow",
-  "entities": [],
-  "relations": [],
-  "meta": {"note": "placeholder; regenerate via python -m data.scripts.generate_structsvg --fixtures"}
-}

@@ -1,6 +1,8 @@
 """Modal entrypoints: volumes, HF secret, E4B smoke + train jobs."""
 from __future__ import annotations
 
+import re
+
 import modal
 
 app = modal.App("structsvg-sft")
@@ -31,6 +33,12 @@ _TRAIN_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
     "TOKENIZERS_PARALLELISM": "false",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+}
+_VLLM_ENV = {
+    **_TRAIN_ENV,
+    # Modal's slim runtime has the CUDA driver but no nvcc. vLLM 0.28's
+    # FlashInfer sampler otherwise attempts a JIT build during engine warmup.
+    "VLLM_USE_FLASHINFER_SAMPLER": "0",
 }
 
 
@@ -94,8 +102,12 @@ def _is_sweep_status_line(line: str) -> bool:
         return True
     sweep_markers = (
         "checkpoint_infer:",
+        "vllm_infer:",
         "loading ",
         "wrote ",
+        "coverage complete",
+        "continue incomplete",
+        "skip complete",
         "skip missing",
         "generated ",
         "Traceback",
@@ -194,7 +206,7 @@ if modal.is_local():
             "pyyaml>=6.0",
             "accelerate>=0.33",
         )
-        .env(_TRAIN_ENV)
+        .env(_VLLM_ENV)
         .add_local_dir(str(_repo / "structsvg_lib"), remote_path="/root/structsvg_lib")
         .add_local_dir(str(_repo / "train"), remote_path="/root/train")
         .add_local_dir(str(_repo / "configs"), remote_path="/root/configs")
@@ -703,7 +715,10 @@ def sweep_remote(
     benches: str = "",
     gen_only: bool = False,
     backend: str = "hf",
-    batch_size: int = 8,
+    batch_size: int = 64,
+    run_name: str = "eval_v2_ctx8192",
+    resume: bool = True,
+    max_new_tokens: int | None = None,
 ):
     return _sweep_impl(
         adapter_root=adapter_root,
@@ -716,6 +731,9 @@ def sweep_remote(
         gen_only=gen_only,
         backend=backend,
         batch_size=batch_size,
+        run_name=run_name,
+        resume=resume,
+        max_new_tokens=max_new_tokens,
     )
 
 
@@ -736,7 +754,10 @@ def sweep_vllm_remote(
     sample_seed: int = 42,
     benches: str = "",
     gen_only: bool = False,
-    batch_size: int = 8,
+    batch_size: int = 64,
+    run_name: str = "eval_v2_ctx8192",
+    resume: bool = True,
+    max_new_tokens: int | None = None,
 ):
     return _sweep_impl(
         adapter_root=adapter_root,
@@ -749,6 +770,9 @@ def sweep_vllm_remote(
         gen_only=gen_only,
         backend="vllm",
         batch_size=batch_size,
+        run_name=run_name,
+        resume=resume,
+        max_new_tokens=max_new_tokens,
     )
 
 
@@ -764,11 +788,16 @@ def _sweep_impl(
     gen_only: bool,
     backend: str,
     batch_size: int,
+    run_name: str,
+    resume: bool,
+    max_new_tokens: int | None,
 ):
     import subprocess
     import sys
 
     sys.path.insert(0, "/root")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_name):
+        raise ValueError("run_name may contain only letters, numbers, dot, underscore, and hyphen")
     cmd = [
         sys.executable,
         "-m",
@@ -780,12 +809,18 @@ def _sweep_impl(
         "--pcts",
         pcts,
         "--out-dir",
-        "/vol/out/metrics/sweep",
+        f"/vol/out/metrics/{run_name}",
+        "--generation-dir",
+        f"/vol/out/generations/{run_name}",
     ]
     if max_samples:
         cmd.extend(["--max-samples", str(max_samples)])
+    if max_new_tokens:
+        cmd.extend(["--max-new-tokens", str(max_new_tokens)])
     if skip_existing:
         cmd.append("--skip-existing")
+    if not resume:
+        cmd.append("--no-resume")
     if gen_only:
         cmd.append("--gen-only")
     if benches:
@@ -867,40 +902,26 @@ def vllm_smoke(
     pct: int = 100,
     max_samples: int = 4,
     benches: str = "vfig_id",
+    run_name: str = "vllm_smoke_ctx8192",
+    max_new_tokens: int = 128,
+    batch_size: int = 4,
 ):
     """Quick vLLM path check: few samples, one checkpoint."""
-    import subprocess
-    import sys
-
-    sys.path.insert(0, "/root")
-    cmd = [
-        sys.executable,
-        "-m",
-        "eval.sweep_checkpoints",
-        "--adapter-root",
-        adapter_root,
-        "--pcts",
-        str(pct),
-        "--max-samples",
-        str(max_samples),
-        "--benches",
-        benches,
-        "--backend",
-        "vllm",
-        "--batch-size",
-        "4",
-        "--out-dir",
-        f"/vol/out/metrics/vllm_smoke_pct{pct}",
-        "--gen-only",
-    ]
-    print("[vllm_smoke]", " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    print(proc.stdout)
-    if proc.stderr:
-        print(proc.stderr)
-    vol_out.commit()
-    ok = proc.returncode == 0
-    return {"ok": ok, "returncode": proc.returncode, "stdout_tail": proc.stdout[-4000:]}
+    return _sweep_impl(
+        adapter_root=adapter_root,
+        protocol="prompt",
+        pcts=str(pct),
+        max_samples=max_samples,
+        skip_existing=False,
+        sample_seed=42,
+        benches=benches,
+        gen_only=True,
+        backend="vllm",
+        batch_size=batch_size,
+        run_name=run_name,
+        resume=True,
+        max_new_tokens=max_new_tokens,
+    )
 
 
 @app.local_entrypoint()
@@ -918,8 +939,11 @@ def main(
     benches: str = "",
     gen_only: bool = False,
     backend: str = "hf",
-    batch_size: int = 8,
+    batch_size: int = 64,
     adapter_root: str = "/vol/out/e4b_broad_v2",
+    run_name: str = "eval_v2_ctx8192",
+    resume: bool = True,
+    max_new_tokens: int = 0,
 ):
     ms = max_samples if max_samples > 0 else None
     if task == "smoke":
@@ -947,7 +971,16 @@ def main(
     elif task == "gallery":
         _print_task_result(gallery_remote.remote())
     elif task == "vllm_smoke":
-        _print_task_result(vllm_smoke.remote(adapter_root=adapter_root, max_samples=ms or 4))
+        _print_task_result(
+            vllm_smoke.remote(
+                adapter_root=adapter_root,
+                max_samples=ms or 4,
+                benches=benches or "vfig_id",
+                run_name=run_name,
+                max_new_tokens=max_new_tokens or 128,
+                batch_size=batch_size,
+            )
+        )
     elif task == "sweep":
         sweep_fn = sweep_vllm_remote if backend == "vllm" else sweep_remote
         fc = sweep_fn.spawn(
@@ -960,6 +993,9 @@ def main(
             benches=benches,
             gen_only=gen_only,
             batch_size=batch_size,
+            run_name=run_name,
+            resume=resume,
+            max_new_tokens=max_new_tokens or None,
         )
         print(f"[sweep] spawned {backend} remote job — safe to close this terminal")
         print(f"[sweep] function_call_id={fc.object_id}")
@@ -974,6 +1010,9 @@ def main(
             sample_seed=sample_seed,
             benches=benches,
             gen_only=gen_only,
+            run_name=run_name,
+            resume=resume,
+            max_new_tokens=max_new_tokens or None,
         )
         print("[sweep] spawned hf remote job — safe to close this terminal")
         print(f"[sweep] function_call_id={fc.object_id}")

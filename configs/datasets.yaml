@@ -13,12 +13,3 @@ flowgen:
   github: https://github.com/nju-websoft/FlowGen
   license: Apache-2.0
   revision: null
-
-structsvg:
-  version: "0.1"
-  grammars: [workflow, geometry]
-  train_n: 2000
-  id_n: 250
-  ood_n: 250
-  seed: 42
-  viewbox: "0 0 512 512"

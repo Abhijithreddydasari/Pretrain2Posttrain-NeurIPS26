@@ -17,6 +17,17 @@ Configs `train_e4b_*.yaml` must set `load_in_4bit: false`, `optim: adamw_torch`.
 
 ---
 
+## 2026-09-04 — Drop synthetic StructSVG; evaluate completed broad v2 run
+
+- Delete the synthetic StructSVG dataset, generator, schema, fixtures, training config, and dataset-specific scene-graph evaluation.
+- Keep only generic SVG parsing/rendering utilities; their `structsvg_lib` package name is legacy infrastructure, not the dropped dataset.
+- Evaluate the completed two-epoch, 8192-token Broad 2k SFT at eight distinct points: base/0%, 5%, 10%, 20%, 40%, 60%, 80%, 100%. `final` duplicates 100%.
+- Deadline subset: 128 fixed-seed examples each from VFIG ID, VFIG OOD, and SVG-Diagrams; bootstrap over examples.
+- Raw validity is primary. Conservative well-formed-prefix recovery is a separately labelled secondary analysis and never replaces the raw generation.
+- Defer curriculum, RL-ordering, and multi-model comparisons until these curves are available.
+
+---
+
 ## 2026-08-12 — Structured SVG SFT lock (plan accepted)
 
 ### Locked

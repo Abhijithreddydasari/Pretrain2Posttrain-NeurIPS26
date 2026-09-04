@@ -118,7 +118,7 @@ Do not train on VFIG-Data until broad checkpoint curves are saved and evaluated.
 
 ## Gates (stop if)
 
-- `python -m eval.gold_recovery` fails on fixtures
+- `python -m pytest -q` fails
 - Broad dry-run cannot load 2000 rows
 - Shuffled-image scores ≈ correct-image (model ignoring vision)
 - Assistant-only loss mask wrong on first E4B forward pass (Modal `--verify-loss-mask`)

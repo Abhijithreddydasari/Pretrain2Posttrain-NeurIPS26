@@ -1,6 +1,6 @@
 # Research Statement
 
-**Working title:** When Does Post-Training Buy SVG Syntax vs Diagram Structure?
+**Working title:** What Does Post-Training Teach a Vision Model About Long SVG Generation?
 
 **Author status:** Solo-author OK. Package doubles as a cold-email research note to a faculty mentor.
 
@@ -16,13 +16,13 @@ https://newinml.github.io/NewInML2026NeurIPS/
 
 ## One-sentence claim (LIMA-style)
 
-> Post-training mainly teaches diagram **SVG syntax / output format**; **compositional spatial / topological structure** remains the bottleneck unless data and evaluation are designed for it.
+> Across a dense SFT checkpoint trajectory, we separate learning to emit and terminate SVG from learning to reconstruct the input diagram faithfully.
 
 ---
 
 ## Research question
 
-Does LoRA SFT on a multimodal **base** VLM teach (a) markup validity and (b) recoverable diagram structure for image→native-SVG reconstruction — and **when** does each emerge across training checkpoints?
+Does LoRA SFT on a multimodal **base** VLM teach (a) SVG opening, closure, and renderability and (b) faithful image reconstruction—and when does each change across training checkpoints?
 
 This is a mechanics / behavior-across-training study, not an SVG SOTA demo.
 
@@ -32,11 +32,11 @@ This is a mechanics / behavior-across-training study, not an SVG SOTA demo.
 
 | ID | Hypothesis |
 |----|------------|
-| **H1** | SVG **parse/render validity rises early** in SFT. |
-| **H2** | **Typed structure** (entities/relations) **lags** and plateaus under plain / broad SFT, especially on compositional OOD. |
-| **H3** | A multimodal **base** model already has **partial** diagram capability from pretraining; SFT mostly **sharpens format** more than structure. |
+| **H1** | SVG opening/closure and parse/render validity improve earlier than visual fidelity. |
+| **H2** | Long-output failure—especially repetition and length-limit termination—remains a bottleneck even after two-epoch SFT. |
+| **H3** | The base-to-SFT trajectory distinguishes pre-trained visual knowledge from post-trained output-format compliance. |
 
-**Falsification:** If structure metrics rise at the same normalized rate as validity on ID **and** OOD under plain SFT, H1/H2 are wrong. If base is near floor on both axes and SFT invents rather than sharpens, H3 is weakened.
+**Falsification:** H1 is unsupported if all-example fidelity rises at the same normalized rate as validity. H2 is unsupported if length-limit and non-closure rates vanish. H3 is descriptive rather than causal because the pretraining mixture is unknown.
 
 ---
 
@@ -57,11 +57,11 @@ diagram image  →  canonical native SVG reconstruction
 | Axis | Choice |
 |------|--------|
 | Model | `google/gemma-4-E4B` **base** (HF); local smoke: E2B + QLoRA on 8GB |
-| Train | LoRA / QLoRA SFT only; no full unfreeze; no RL in v0 |
-| Conditions | (1) base zero-shot (2) **2k broad-diagram** SFT (3) **2k StructSVG** SFT — matched token budget |
-| Primary bench | **StructSVG** — workflows + geometry; ID + compositional OOD |
-| External topology | **FlowGen** (node–edge triplets / Strict F1 style) |
-| Secondary | **SVG-Diagrams** perceptual/comparability (DINO); not the main claim |
+| Train | Completed two-epoch, 8192-token bf16 LoRA SFT on the Broad 2k coreset; no RL |
+| Conditions | Base/0% and Broad-SFT checkpoints at 5, 10, 20, 40, 60, 80, 100% |
+| Primary bench | VFIG-Bench ID (gold SVG) |
+| Generalization | VFIG-Bench OOD syntax/termination probe (image-only) |
+| Secondary | SVG-Diagrams test with gold SVG |
 | Checkpoints | 0, 5, 10, 20, 40, 60, 80, 100% |
 
 ---
@@ -79,13 +79,12 @@ We are **not** pitching a whiteboard product or beating StarVector on SVG-Bench.
 
 ## Core metrics (pre-registered)
 
-1. Parse / render validity  
-2. Typed entity (node) F1  
-3. Typed relation (edge) F1  
-4. One spatial aggregate (workflow: reachability; geometry: relation accuracy)  
-5. DINO similarity (secondary)  
-6. ID–OOD gap  
-7. Emergence times `t50` / `t90` of base→final gain; area between syntax and structure curves  
+1. SVG opening rate, closing rate, and length-limit termination rate
+2. Raw parse/render validity
+3. SSIM and DINO over **all** gold examples, with invalid generations scored as zero
+4. SSIM and DINO conditional on raw validity (diagnostic only)
+5. Conservative recovered-prefix validity/fidelity (separately labelled secondary analysis)
+6. Emergence times `t50` / `t90` of base→final gain
 
 Bootstrap over examples for CIs. Exact string match is **not** a primary metric.
 
@@ -97,26 +96,22 @@ Bootstrap over examples for CIs. Exact string match is **not** a primary metric.
 - DPO / GRPO / RL (until SFT curves exist)  
 - Training on full SVG-Stack / 100k+ scrapes  
 - Multi-model bakeoffs  
-- Mixed SFT, VFig/SVGenius, real-iPad train (follow-ups)
+- Synthetic structure data, mixed SFT, VFIG training, real-iPad train (follow-ups)
 
 ---
 
-## Timeline (to Aug 29, 2026 AoE)
+## Deadline execution
 
 | Window | Deliverable |
 |--------|-------------|
-| Aug 12–13 | Locked contract, accounts, mailable note, repo setup |
-| Aug 14–16 | Eval harness + gold recovery; public filter; StructSVG pilot |
-| Aug 17–18 | Final splits; base baselines; overfit gates |
-| Aug 19–22 | Matched E4B SFT runs + checkpoint generation |
-| Aug 23–25 | Frozen eval, human audit, figures |
-| Aug 25–27 | Short paper draft |
-| Aug 28–29 | Repro dry-run + OpenReview submit |
+| Overnight Sep 4 | vLLM smoke, then 128-example × 3-bench × 8-checkpoint generation |
+| Sep 4 | Score cached outputs, bootstrap CIs, inspect failure gallery |
+| Sep 4–5 | Write compact checkpoint-trajectory paper and submit |
 
 ---
 
 ## Success looks like
 
-> “Validity jumps by mid-SFT; topology stays flat on compositional OOD under broad data; structure-designed data narrows the gap.”
+> A complete, falsifiable checkpoint curve showing whether broad SFT improves SVG syntax, termination, and image fidelity together or at different rates—including a negative result if validity remains low.
 
 Not: “We achieve 82% validity.”

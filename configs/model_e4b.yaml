@@ -7,7 +7,9 @@ torch_dtype: bfloat16
 attn_implementation: sdpa
 use_base_not_it: true
 max_soft_tokens: 560
-max_model_len: 4096
+# Training v2 retained complete sequences up to 8192 tokens. Inference must not
+# squeeze the multimodal prompt and generated SVG into the old 4096-token cap.
+max_model_len: 8192
 lora:
   r: 16
 prompt_template: |
@@ -17,7 +19,7 @@ prompt_template: |
 svg_prefix_scaffold: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">"
 generation:
   # vfig_id gold target length: p50=1828, p90=3745 tokens (outputs/metrics/token_audit.json).
-  # A 1536-token / 90 s budget guillotined every pred at ~695 tokens; do not reintroduce.
+  # This output budget now sits inside an 8192-token model context.
   max_new_tokens: 4096
   max_time: null
   do_sample: false

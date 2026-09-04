@@ -15,13 +15,14 @@ forbidden_tags:
 metrics:
   primary:
     - parse_render_validity
-    - entity_f1
-    - relation_f1
-    - spatial_aggregate
-    - id_ood_gap
+    - svg_close_rate
+    - length_limit_rate
+    - ssim_all_examples
+    - recovered_validity
     - emergence_t50_t90
   secondary:
     - dino_similarity
+    - valid_only_similarity
     - compactness
 controls:
   - correct

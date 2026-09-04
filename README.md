@@ -116,7 +116,7 @@ Processed outputs are written to `data/processed/svg_diagrams/` (gitignored). Se
 
 ## Evaluation
 
-Code: [structsvg_lib/](structsvg_lib/) (parse, render, metrics) and [eval/](eval/). See [eval/README.md](eval/README.md) for the full bench list.
+Code: [structsvg_lib/](structsvg_lib/) (shared parse/render/metrics utilities; legacy package name) and [eval/](eval/). See [eval/README.md](eval/README.md) for the full bench list.
 
 | Bench | What it measures |
 |-------|------------------|
@@ -127,17 +127,15 @@ Code: [structsvg_lib/](structsvg_lib/) (parse, render, metrics) and [eval/](eval
 
 Generations are cached once; metrics can be rescored without re-running the model.
 
-```bash
-python -m eval.gold_recovery
-```
+Raw SVG validity and conservative prefix-recovery validity are reported separately; repaired output never replaces the model's raw prediction.
 
 ---
 
-## Training (next)
+## Training
 
 Local smoke: E2B QLoRA on 8GB ([configs/train_e2b_qlora_smoke.yaml](configs/train_e2b_qlora_smoke.yaml)). Full runs: E4B LoRA on Modal ([train/modal_app.py](train/modal_app.py), [configs/train_e4b_broad.yaml](configs/train_e4b_broad.yaml)).
 
-Loss is CE on **target SVG tokens only** (image + prompt masked). Checkpoints are saved at fixed fractions of the matched 2k schedule.
+The completed v2 run is two-epoch, 8192-token bf16 LoRA SFT. Loss is CE on **target SVG tokens only** (image + prompt masked). The eight distinct evaluation points are base/0%, 5%, 10%, 20%, 40%, 60%, 80%, and 100%; `final` duplicates 100% and is not a ninth scientific checkpoint.
 
 ---
 
@@ -146,10 +144,10 @@ Loss is CE on **target SVG tokens only** (image + prompt masked). Checkpoints ar
 ```text
 notes/          research statement, experiment card, canonical SVG spec
 configs/        train / eval YAML
-data/           schemas, broad scripts, VFIG eval adapter (planned)
+data/           broad scripts and VFIG/SVG-Diagrams eval adapters
 train/          LoRA SFT + Modal entrypoints (`train/modal_app.py`)
 eval/           runners, checkpoint curves
-structsvg_lib/  shared SVG parse/render/metrics (library name; not the dropped dataset)
+structsvg_lib/  shared SVG parse/render/metrics (legacy library name only)
 paper/          draft
 assets/         README figures (from broad analysis)
 ```
@@ -180,6 +178,11 @@ python -m train.lora_sft --config configs/train_e4b_broad.yaml --dry-run
 # Modal E4B smoke + train
 modal run train/modal_app.py --task smoke
 modal run train/modal_app.py --task train --config train_e4b_broad.yaml
+
+# Fresh, resumable vLLM checkpoint sweep (128 fixed examples per bench)
+modal run train/modal_app.py --task vllm_smoke --run-name smoke_ctx8192
+modal run train/modal_app.py --task sweep --backend vllm --gen-only --max-samples 128 \
+  --benches vfig_id,vfig_ood,svg_diagrams --run-name eval128_ctx8192
 ```
 
 ---
