@@ -1,56 +1,14 @@
-"""Metric helpers: validity, structure, emergence, bootstrap."""
+"""Metric helpers for checkpoint emergence and bootstrap intervals."""
 from __future__ import annotations
 
 import math
 import random
-from typing import Any, Iterable
-
-from structsvg_lib.scene_graph import (
-    SceneGraph,
-    entity_f1,
-    relation_f1,
-    spatial_aggregate,
-)
-from structsvg_lib.svg_ops import extract_svg_blob, validate_svg
-
-
-def score_example(
-    pred_text: str,
-    gold_svg: str | None,
-    gold_graph: SceneGraph | None,
-    pred_graph: SceneGraph | None = None,
-) -> dict[str, Any]:
-    blob = extract_svg_blob(pred_text) or pred_text
-    val = validate_svg(blob, try_render=True)
-    out: dict[str, Any] = {
-        "parse_ok": val.parse_ok,
-        "render_ok": val.render_ok,
-        "validity": float(val.ok),
-        "n_drawable": val.n_drawable,
-        "errors": val.errors,
-    }
-    if gold_graph is not None and pred_graph is not None:
-        out["entity_f1"] = entity_f1(pred_graph, gold_graph)["f1"]
-        out["relation_f1"] = relation_f1(pred_graph, gold_graph)["f1"]
-        out["spatial"] = spatial_aggregate(pred_graph, gold_graph)
-    else:
-        out["entity_f1"] = None
-        out["relation_f1"] = None
-        out["spatial"] = None
-    if gold_svg:
-        gv = validate_svg(gold_svg, try_render=False)
-        out["gold_ok"] = gv.ok or gv.parse_ok
-    return out
+from typing import Iterable
 
 
 def mean(xs: Iterable[float | None]) -> float:
     vals = [x for x in xs if x is not None and not (isinstance(x, float) and math.isnan(x))]
     return sum(vals) / len(vals) if vals else float("nan")
-
-
-def aggregate_scores(rows: list[dict[str, Any]]) -> dict[str, float]:
-    keys = ["validity", "entity_f1", "relation_f1", "spatial"]
-    return {k: mean(r.get(k) for r in rows) for k in keys}
 
 
 def bootstrap_ci(
@@ -109,7 +67,3 @@ def area_between(syntax: list[float], structure: list[float], pcts: list[float])
         y1 = sg[i + 1] - st[i + 1]
         area += 0.5 * (y0 + y1) * dx
     return area
-
-
-def id_ood_gap(id_metric: float, ood_metric: float) -> float:
-    return id_metric - ood_metric

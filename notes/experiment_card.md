@@ -1,12 +1,12 @@
-# Experiment Card (v0 — locked)
+# Experiment Card (deadline v0 — locked 2026-09-04)
 
-Status: **task, metrics, conditions, and grammars locked**. Implement eval before full training.
+Status: Broad v2 SFT is complete; generation/evaluation is the critical path.
 
 ---
 
 ## 1. Claim under test
 
-LoRA SFT mainly buys **SVG syntax/format**; **compositional structure** lags unless data+eval pressure it. Structure-designed data should change checkpoint timing and OOD topology relative to matched broad-diagram SFT.
+Measure whether broad LoRA SFT changes SVG syntax/termination before it changes faithful image reconstruction, without assuming that either improvement must occur.
 
 ---
 
@@ -16,11 +16,11 @@ LoRA SFT mainly buys **SVG syntax/format**; **compositional structure** lags unl
 |------|--------|
 | Task | Diagram **image → canonical native SVG** |
 | Model | `google/gemma-4-E4B` base; smoke: `E2B` QLoRA @ 8GB local |
-| Train | LoRA / QLoRA SFT; assistant/target-SVG tokens only in loss |
+| Train | Two-epoch bf16 LoRA SFT; assistant/target-SVG tokens only in loss; 8192-token sequences |
 | Stages | Single stage SFT (no DPO/GRPO/RL) |
-| Conditions | Base · Broad 2k · StructSVG 2k (matched supervised token budget) |
+| Conditions | Base/0% · Broad 2k checkpoints at 5/10/20/40/60/80/100% |
 | Output | Canonical SVG (`notes/canonical_svg.md`) |
-| Holdout | StructSVG compositional OOD |
+| Eval | VFIG ID/OOD and SVG-Diagrams fixed seeded subsets |
 
 ### Inference protocols (document both)
 
@@ -44,16 +44,6 @@ LoRA SFT mainly buys **SVG syntax/format**; **compositional structure** lags unl
 - Dedup against SVG-Diagrams external test (~474) via normalized SVG hash + perceptual hash
 - Stratified sample to 2k under token budget
 
-### StructSVG (2k train / 250 ID / 250 OOD)
-
-| Grammar | Content |
-|---------|---------|
-| Workflows | Boxes, decisions, directed edges; Graphviz→SVG; scene-graph JSON |
-| Geometry | Points, segments, triangles/circles, incidence/containment/relative position |
-
-**Train/ID:** single branch or merge; ≤6 workflow nodes; unnested; single geometry relations.  
-**OOD:** branch+merge; nested groups; longer paths; unseen arrangements of seen primitives; (later) clean→noisy render.
-
 ### External eval (not primary train)
 
 - **FlowGen** — topology / Strict F1 style after deterministic SVG conversion + triplet extraction  
@@ -68,12 +58,12 @@ Clean rasters first. Noisy whiteboard + iPad = test-only follow-up.
 | # | Metric | Role |
 |---|--------|------|
 | 1 | Parse / render validity | Syntax / H1 |
-| 2 | Typed entity F1 | Structure |
-| 3 | Typed relation F1 | Structure |
-| 4 | Spatial aggregate (reachability or geometry-relation acc.) | Structure |
-| 5 | DINO similarity | Secondary perceptual |
-| 6 | ID–OOD gap | Composition / H2 |
-| 7 | `t50` / `t90` emergence; area(syntax−structure) | Timing |
+| 2 | SVG opening, closure, length-limit rates | Termination |
+| 3 | SSIM across all gold examples; invalid = 0 | Primary fidelity |
+| 4 | DINO across all gold examples; invalid = 0 | Primary perceptual fidelity |
+| 5 | Valid-only SSIM/DINO | Diagnostic |
+| 6 | Conservative prefix-recovery validity/fidelity | Secondary salvage analysis |
+| 7 | `t50` / `t90` emergence | Timing |
 
 Controls: correct image · shuffled image · blank image.
 
@@ -85,10 +75,10 @@ Exact string match: **not** primary.
 
 | Observation | Interpretation |
 |-------------|----------------|
-| Validity ↑ early; structure flat (esp. OOD) | Supports H1/H2 |
-| Structure ↑ with validity on ID **and** OOD | Falsifies H1/H2 |
-| Broad ≈ structured on topology | Data-design claim weakened; still report |
-| Base already strong on structure | Supports H3; sharpening story |
+| Validity ↑ before all-example fidelity | Supports syntax-before-reconstruction claim |
+| Fidelity ↑ with validity | Falsifies timing separation; report |
+| Non-closure/repetition persists | Supports long-generation bottleneck |
+| All metrics stay near floor | Negative result: broad SFT did not teach reliable SVG reconstruction |
 
 Do **not** change metrics post-hoc to rescue the hypothesis. Do **not** add RL to rescue v0.
 
@@ -107,13 +97,13 @@ Do **not** change metrics post-hoc to rescue the hypothesis. Do **not** add RL t
 ## 7. Deliverables
 
 - Checkpoint curves (validity, structure, ID/OOD)  
-- Broad vs StructSVG comparison  
+- Base-to-SFT checkpoint comparison
 - Qualitative failure gallery  
 - 4–5 page Pre→Post draft + repro package  
 
 ## Deferred
 
-Mixed SFT, RL, VFig/SVGenius **training**, sequential tutor actions, iPad train, multi-seed if budget-bound.
+Curriculum SFT, RL ordering, multi-model replication, VFIG **training**, sequential tutor actions, iPad train, and multi-seed runs.
 
 ### VFIG (eval first, train later)
 
@@ -124,4 +114,4 @@ Mixed SFT, RL, VFig/SVGenius **training**, sequential tutor actions, iPad train,
 
 Workshop fit does **not** require multiple families in v0. The primary pre→post bridge is **Gemma 4 E4B base @ 0%** vs SFT checkpoints on the **same** weights.
 
-If budget allows after Gemma: add **one** open **base** VLM (not VFIG’s instruct backbones), same manifests and StructSVG eval, sparse checkpoints (e.g. 0/20/60/100%) — tests whether syntax-before-structure timing replicates across pretraining recipes.
+If budget allows after the checkpoint curves, add one open base VLM on the same fixed evaluation manifests.

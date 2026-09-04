@@ -1,6 +1,8 @@
 """Modal entrypoints: volumes, HF secret, E4B smoke + train jobs."""
 from __future__ import annotations
 
+import re
+
 import modal
 
 app = modal.App("structsvg-sft")
@@ -31,6 +33,12 @@ _TRAIN_ENV = {
     "HF_XET_HIGH_PERFORMANCE": "1",
     "TOKENIZERS_PARALLELISM": "false",
     "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+}
+_VLLM_ENV = {
+    **_TRAIN_ENV,
+    # Modal's slim runtime has the CUDA driver but no nvcc. vLLM 0.28's
+    # FlashInfer sampler otherwise attempts a JIT build during engine warmup.
+    "VLLM_USE_FLASHINFER_SAMPLER": "0",
 }
 
 
@@ -94,8 +102,12 @@ def _is_sweep_status_line(line: str) -> bool:
         return True
     sweep_markers = (
         "checkpoint_infer:",
+        "vllm_infer:",
         "loading ",
         "wrote ",
+        "coverage complete",
+        "continue incomplete",
+        "skip complete",
         "skip missing",
         "generated ",
         "Traceback",
@@ -182,8 +194,31 @@ if modal.is_local():
     _svgtest = _repo / "data" / "processed" / "svg_diagrams_test"
     if _svgtest.exists() and (_svgtest / "test_manifest.jsonl").exists():
         image = image.add_local_dir(str(_svgtest), remote_path=f"{DATA_ROOT}/processed/svg_diagrams_test")
+    # vLLM image: separate from train image to avoid torch/transformers pin conflicts.
+    vllm_image = (
+        modal.Image.debian_slim(python_version="3.11")
+        .apt_install("libcairo2", "libgdk-pixbuf2.0-0", "libffi-dev", "shared-mime-info")
+        .pip_install(
+            "vllm>=0.22.0",
+            "transformers>=4.52",
+            "peft>=0.12",
+            "pillow>=10.0",
+            "pyyaml>=6.0",
+            "accelerate>=0.33",
+        )
+        .env(_VLLM_ENV)
+        .add_local_dir(str(_repo / "structsvg_lib"), remote_path="/root/structsvg_lib")
+        .add_local_dir(str(_repo / "train"), remote_path="/root/train")
+        .add_local_dir(str(_repo / "configs"), remote_path="/root/configs")
+        .add_local_dir(str(_repo / "eval"), remote_path="/root/eval")
+    )
+    if _vfig.exists() and (_vfig / "id_manifest.jsonl").exists():
+        vllm_image = vllm_image.add_local_dir(str(_vfig), remote_path=f"{DATA_ROOT}/processed/vfig_bench")
+    if _svgtest.exists() and (_svgtest / "test_manifest.jsonl").exists():
+        vllm_image = vllm_image.add_local_dir(str(_svgtest), remote_path=f"{DATA_ROOT}/processed/svg_diagrams_test")
 else:
     image = image.env(_TRAIN_ENV)
+    vllm_image = image
 
 
 def _resolve_train_config(cfg: dict, *, manifest_override: str | None = None) -> dict:
@@ -370,8 +405,13 @@ def smoke_e4b(*, bf16: bool = True):
     secrets=[hf_secret],
     volumes=VOLUME_MOUNTS,
 )
-def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int = 2000):
-    """Stress probe: 4×2 → 3×3 → 2×4 → 1×8 (all grad_ckpt); VRAM + step timing."""
+def probe_train(
+    config_name: str = "train_e4b_broad.yaml",
+    max_samples: int = 16,
+    max_steps: int = 3,
+    n_train_samples: int = 2000,
+):
+    """Stress probe configured batch first, then smaller fallbacks."""
     import copy
     import json
     import sys
@@ -383,13 +423,23 @@ def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int 
     from train.checkpoint_utils import estimate_total_steps
     from train.data_utils import load_manifest, longest_rows, resolve_svg
 
-    cfg_path = Path("/root/configs/train_e4b_broad.yaml")
+    cfg_path = Path("/root/configs") / config_name
+    if not cfg_path.exists():
+        return {"ok": False, "error": f"missing config {cfg_path}"}
     base_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     num_epochs = float(base_cfg["train"].get("num_train_epochs", 3))
     base_cfg = _resolve_train_config(base_cfg)
     man = Path(base_cfg["data"]["manifest"])
     all_rows = load_manifest(man, base_cfg["data"].get("max_samples"))
-    stress_rows = longest_rows(all_rows, max_samples)
+    # Probe near the 8192-token ceiling without deliberately selecting the
+    # handful that the token-budget gate must reject. Character length is only
+    # a prefilter; the exact collator gate still decides what fits.
+    max_seq_length = int(base_cfg["train"].get("max_seq_length", 4096))
+    if max_seq_length >= 8192:
+        fit_candidates = [r for r in all_rows if len(resolve_svg(r)) <= 15000]
+        stress_rows = longest_rows(fit_candidates, max_samples)
+    else:
+        stress_rows = longest_rows(all_rows, max_samples)
     top_len = len(resolve_svg(stress_rows[0])) if stress_rows else 0
     print(f"[probe] stress set: {len(stress_rows)} longest SVGs (max svg chars={top_len})", flush=True)
 
@@ -399,25 +449,31 @@ def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int 
     base_cfg["data"]["max_samples"] = len(stress_rows)
     base_cfg["train"]["logging_steps"] = 1
 
-    candidates = [
-        (4, 2, "4×2+grad_ckpt eff=8"),
-        (3, 3, "3×3+grad_ckpt eff=9"),
-        (2, 4, "2×4+grad_ckpt eff=8"),
-        (1, 8, "1×8+grad_ckpt eff=8"),
-    ]
+    configured = (
+        int(base_cfg["train"].get("per_device_train_batch_size", 1)),
+        int(base_cfg["train"].get("gradient_accumulation_steps", 8)),
+    )
+    candidates = [configured]
+    for candidate in ((2, 4), (1, 8)):
+        if candidate not in candidates:
+            candidates.append(candidate)
     modal_hr = 2.50
     benchmarks: list[dict] = []
     recommended: dict | None = None
     last: dict = {"ok": False, "error": "no candidates tried"}
 
-    for batch_size, grad_accum, label in candidates:
+    for batch_size, grad_accum in candidates:
+        label = f"{batch_size}×{grad_accum}+grad_ckpt eff={batch_size * grad_accum}"
         cfg = copy.deepcopy(base_cfg)
         cfg["train"].update(
             {
                 "per_device_train_batch_size": batch_size,
                 "gradient_accumulation_steps": grad_accum,
                 "gradient_checkpointing": True,
-                "output_dir": f"/vol/out/probe_train_b{batch_size}a{grad_accum}_gc",
+                "output_dir": (
+                    f"/vol/out/probes/{Path(config_name).stem}_"
+                    f"b{batch_size}a{grad_accum}_gc"
+                ),
             }
         )
         print(f"[probe] trying {label} on A100-80GB...", flush=True)
@@ -468,6 +524,7 @@ def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int 
                     else f"A100-80GB ({label})"
                 ),
             }
+            break
         if not result.get("ok"):
             blob = (result.get("error") or "") + "\n".join(result.get("error_tail") or [])
             if "OutOfMemoryError" not in blob and "CUDA out of memory" not in blob:
@@ -475,7 +532,11 @@ def probe_train(max_samples: int = 32, max_steps: int = 2, n_train_samples: int 
                 break
         last = result
 
-    print("[probe] === benchmark summary (2k × 3 epochs, longest-32 stress) ===", flush=True)
+    print(
+        f"[probe] === benchmark summary ({n_train_samples} samples × {num_epochs:g} epochs, "
+        f"longest-{len(stress_rows)} stress, config={config_name}) ===",
+        flush=True,
+    )
     for b in benchmarks:
         status = "OK" if b["ok"] else "OOM"
         t = f"{b['step_sec_avg']:.1f}s/step" if b["step_sec_avg"] else "—"
@@ -638,7 +699,7 @@ def infer_remote(
 
 @app.function(
     image=image,
-    gpu="L4",
+    gpu="A100-80GB",
     timeout=24 * 60 * 60,
     secrets=[hf_secret],
     volumes=VOLUME_MOUNTS,
@@ -649,11 +710,94 @@ def sweep_remote(
     protocol: str = "prompt",
     pcts: str = "0,5,10,20,40,60,80,100",
     max_samples: int | None = None,
+    skip_existing: bool = False,
+    sample_seed: int = 42,
+    benches: str = "",
+    gen_only: bool = False,
+    backend: str = "hf",
+    batch_size: int = 64,
+    run_name: str = "eval_v2_ctx8192",
+    resume: bool = True,
+    max_new_tokens: int | None = None,
+):
+    return _sweep_impl(
+        adapter_root=adapter_root,
+        protocol=protocol,
+        pcts=pcts,
+        max_samples=max_samples,
+        skip_existing=skip_existing,
+        sample_seed=sample_seed,
+        benches=benches,
+        gen_only=gen_only,
+        backend=backend,
+        batch_size=batch_size,
+        run_name=run_name,
+        resume=resume,
+        max_new_tokens=max_new_tokens,
+    )
+
+
+@app.function(
+    image=vllm_image,
+    gpu="A100-80GB",
+    timeout=24 * 60 * 60,
+    secrets=[hf_secret],
+    volumes=VOLUME_MOUNTS,
+)
+def sweep_vllm_remote(
+    *,
+    adapter_root: str = "/vol/out/e4b_broad_v2",
+    protocol: str = "prompt",
+    pcts: str = "0,5,10,20,40,60,80,100",
+    max_samples: int | None = None,
+    skip_existing: bool = False,
+    sample_seed: int = 42,
+    benches: str = "",
+    gen_only: bool = False,
+    batch_size: int = 64,
+    run_name: str = "eval_v2_ctx8192",
+    resume: bool = True,
+    max_new_tokens: int | None = None,
+):
+    return _sweep_impl(
+        adapter_root=adapter_root,
+        protocol=protocol,
+        pcts=pcts,
+        max_samples=max_samples,
+        skip_existing=skip_existing,
+        sample_seed=sample_seed,
+        benches=benches,
+        gen_only=gen_only,
+        backend="vllm",
+        batch_size=batch_size,
+        run_name=run_name,
+        resume=resume,
+        max_new_tokens=max_new_tokens,
+    )
+
+
+def _sweep_impl(
+    *,
+    adapter_root: str,
+    protocol: str,
+    pcts: str,
+    max_samples: int | None,
+    skip_existing: bool,
+    sample_seed: int,
+    benches: str,
+    gen_only: bool,
+    backend: str,
+    batch_size: int,
+    run_name: str,
+    resume: bool,
+    max_new_tokens: int | None,
 ):
     import subprocess
     import sys
 
     sys.path.insert(0, "/root")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", run_name):
+        raise ValueError("run_name may contain only letters, numbers, dot, underscore, and hyphen")
     cmd = [
         sys.executable,
         "-m",
@@ -665,10 +809,25 @@ def sweep_remote(
         "--pcts",
         pcts,
         "--out-dir",
-        "/vol/out/metrics/sweep",
+        f"/vol/out/metrics/{run_name}",
+        "--generation-dir",
+        f"/vol/out/generations/{run_name}",
     ]
     if max_samples:
         cmd.extend(["--max-samples", str(max_samples)])
+    if max_new_tokens:
+        cmd.extend(["--max-new-tokens", str(max_new_tokens)])
+    if skip_existing:
+        cmd.append("--skip-existing")
+    if not resume:
+        cmd.append("--no-resume")
+    if gen_only:
+        cmd.append("--gen-only")
+    if benches:
+        cmd.extend(["--benches", benches])
+    cmd.extend(["--sample-seed", str(sample_seed)])
+    if backend == "vllm":
+        cmd.extend(["--backend", "vllm", "--batch-size", str(batch_size)])
     print("[sweep]", " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     from collections import deque
@@ -693,6 +852,78 @@ def sweep_remote(
     }
 
 
+@app.function(
+    image=image,
+    volumes=VOLUME_MOUNTS,
+    timeout=30 * 60,
+)
+def gallery_remote(
+    preds_path: str = "/vol/out/generations/sweep/vfig_id_pct_100_prompt.jsonl",
+    manifest_path: str = "/vol/out/metrics/sweep/eval_subset_vfig_id_10_seed42.jsonl",
+    out_dir: str = "/vol/out/gallery/vfig_id_pct_100",
+    title: str = "vfig_id pct_100",
+):
+    import subprocess
+    import sys
+
+    sys.path.insert(0, "/root")
+    cmd = [
+        sys.executable,
+        "-m",
+        "eval.gallery_generations_files",
+        "--preds",
+        preds_path,
+        "--manifest",
+        manifest_path,
+        "--out-dir",
+        out_dir,
+        "--title",
+        title,
+    ]
+    print("[gallery]", " ".join(cmd))
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(proc.stdout)
+    if proc.stderr:
+        print(proc.stderr)
+    vol_out.commit()
+    return {"ok": proc.returncode == 0, "out_dir": out_dir, "stdout": proc.stdout[-2000:]}
+
+
+@app.function(
+    image=vllm_image,
+    gpu="A100-80GB",
+    timeout=60 * 60,
+    secrets=[hf_secret],
+    volumes=VOLUME_MOUNTS,
+)
+def vllm_smoke(
+    *,
+    adapter_root: str = "/vol/out/e4b_broad_v2",
+    pct: int = 100,
+    max_samples: int = 4,
+    benches: str = "vfig_id",
+    run_name: str = "vllm_smoke_ctx8192",
+    max_new_tokens: int = 128,
+    batch_size: int = 4,
+):
+    """Quick vLLM path check: few samples, one checkpoint."""
+    return _sweep_impl(
+        adapter_root=adapter_root,
+        protocol="prompt",
+        pcts=str(pct),
+        max_samples=max_samples,
+        skip_existing=False,
+        sample_seed=42,
+        benches=benches,
+        gen_only=True,
+        backend="vllm",
+        batch_size=batch_size,
+        run_name=run_name,
+        resume=True,
+        max_new_tokens=max_new_tokens,
+    )
+
+
 @app.local_entrypoint()
 def main(
     task: str = "smoke",
@@ -702,6 +933,17 @@ def main(
     adapter: str = "",
     protocol: str = "prompt",
     max_samples: int = 0,
+    pcts: str = "0,5,10,20,40,60,80,100",
+    skip_existing: bool = False,
+    sample_seed: int = 42,
+    benches: str = "",
+    gen_only: bool = False,
+    backend: str = "hf",
+    batch_size: int = 64,
+    adapter_root: str = "/vol/out/e4b_broad_v2",
+    run_name: str = "eval_v2_ctx8192",
+    resume: bool = True,
+    max_new_tokens: int = 0,
 ):
     ms = max_samples if max_samples > 0 else None
     if task == "smoke":
@@ -709,19 +951,71 @@ def main(
     elif task == "upload_status":
         _print_task_result(upload_broad_status.remote())
     elif task == "probe":
-        _print_task_result(probe_train.remote())
+        _print_task_result(probe_train.remote(config_name=config))
     elif task == "train_dry":
         _print_task_result(train_remote.remote(config, dry_run=True))
     elif task == "verify_mask":
         _print_task_result(train_remote.remote(config, verify_loss_mask=True, max_samples=8))
     elif task == "train":
-        _print_task_result(train_remote.remote(config))
+        # spawn (not .remote): local entrypoint must return immediately so closing
+        # the terminal / IDE does not cancel a multi-hour GPU job.
+        fc = train_remote.spawn(config)
+        print("[train] spawned remote job — safe to close this terminal")
+        print(f"[train] function_call_id={fc.object_id}")
+        print("[train] tail logs: modal app logs structsvg-sft")
     elif task == "infer":
         if not manifest or not out:
             raise SystemExit("infer requires --manifest and --out")
         ap = adapter or None
         _print_task_result(infer_remote.remote(manifest, out, adapter_path=ap, protocol=protocol, max_samples=ms))
+    elif task == "gallery":
+        _print_task_result(gallery_remote.remote())
+    elif task == "vllm_smoke":
+        _print_task_result(
+            vllm_smoke.remote(
+                adapter_root=adapter_root,
+                max_samples=ms or 4,
+                benches=benches or "vfig_id",
+                run_name=run_name,
+                max_new_tokens=max_new_tokens or 128,
+                batch_size=batch_size,
+            )
+        )
     elif task == "sweep":
-        _print_task_result(sweep_remote.remote(protocol=protocol, max_samples=ms))
+        sweep_fn = sweep_vllm_remote if backend == "vllm" else sweep_remote
+        fc = sweep_fn.spawn(
+            adapter_root=adapter_root,
+            protocol=protocol,
+            max_samples=ms,
+            pcts=pcts,
+            skip_existing=skip_existing,
+            sample_seed=sample_seed,
+            benches=benches,
+            gen_only=gen_only,
+            batch_size=batch_size,
+            run_name=run_name,
+            resume=resume,
+            max_new_tokens=max_new_tokens or None,
+        )
+        print(f"[sweep] spawned {backend} remote job — safe to close this terminal")
+        print(f"[sweep] function_call_id={fc.object_id}")
+        print("[sweep] tail logs: modal app logs structsvg-sft")
+    elif task == "sweep_hf":
+        fc = sweep_remote.spawn(
+            adapter_root=adapter_root,
+            protocol=protocol,
+            max_samples=ms,
+            pcts=pcts,
+            skip_existing=skip_existing,
+            sample_seed=sample_seed,
+            benches=benches,
+            gen_only=gen_only,
+            run_name=run_name,
+            resume=resume,
+            max_new_tokens=max_new_tokens or None,
+        )
+        print("[sweep] spawned hf remote job — safe to close this terminal")
+        print(f"[sweep] function_call_id={fc.object_id}")
+        print("[sweep] tail logs: modal app logs structsvg-sft")
     else:
         raise SystemExit(f"unknown task {task}")

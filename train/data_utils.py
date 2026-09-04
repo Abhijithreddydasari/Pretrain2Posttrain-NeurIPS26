@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -43,6 +45,14 @@ def _resolve_path(p: str | Path) -> Path:
         alt3 = _REPO_ROOT / rel
         if alt3.exists():
             return alt3
+        # Modal processed-data volume layout:
+        # /vol/data/processed/... (manifest rows remain repo-relative data/processed/...).
+        vol_alt = Path("/vol/data") / Path(*rel.parts[1:])
+        if vol_alt.exists():
+            return vol_alt
+        vol_repo_alt = Path("/vol/data") / rel
+        if vol_repo_alt.exists():
+            return vol_repo_alt
     if _DATA_ROOT is not None:
         alt = _DATA_ROOT / path.as_posix().lstrip("/")
         if alt.exists():
@@ -54,7 +64,34 @@ def _resolve_path(p: str | Path) -> Path:
     return path
 
 
-def load_manifest(path: Path, max_samples: int | None = None) -> list[dict]:
+def row_has_loadable_image(row: dict) -> bool:
+    """True if resolve_image would succeed (PNG on disk or renderable SVG)."""
+    if row.get("image_path"):
+        p = _resolve_path(row["image_path"])
+        if p.is_file():
+            return True
+    svg = row.get("svg")
+    if not svg and row.get("svg_path"):
+        p = _resolve_path(row["svg_path"])
+        if not p.is_file():
+            return False
+        svg = p.read_text(encoding="utf-8")
+    if not svg:
+        return False
+    try:
+        render_pil(svg, size=TRAIN_RENDER_LONG_EDGE)
+        return True
+    except Exception:
+        return False
+
+
+def load_manifest(
+    path: Path,
+    max_samples: int | None = None,
+    *,
+    sample_seed: int | None = None,
+    require_loadable_image: bool = False,
+) -> list[dict]:
     rows = []
     with path.open(encoding="utf-8") as f:
         for line in f:
@@ -62,8 +99,32 @@ def load_manifest(path: Path, max_samples: int | None = None) -> list[dict]:
             if not line:
                 continue
             rows.append(json.loads(line))
-            if max_samples and len(rows) >= max_samples:
-                break
+
+    if require_loadable_image:
+        before = len(rows)
+        rows = [r for r in rows if row_has_loadable_image(r)]
+        print(
+            f"load_manifest: {path.name} loadable {len(rows)}/{before}",
+            flush=True,
+        )
+
+    if max_samples is not None and sample_seed is not None:
+        rows.sort(key=lambda r: str(r.get("id", "")))
+        rng = random.Random(sample_seed)
+        indices = list(range(len(rows)))
+        rng.shuffle(indices)
+        pick = sorted(indices[:max_samples], key=lambda i: rows[i].get("id", ""))
+        rows = [rows[i] for i in pick]
+    elif max_samples:
+        rows = rows[:max_samples]
+
+    if max_samples is not None and sample_seed is not None:
+        print(
+            f"load_manifest: {path.name} selected n={len(rows)} seed={sample_seed}"
+            + (f" ids={[r.get('id') for r in rows[:3]]}..." if rows else ""),
+            flush=True,
+        )
+
     return rows
 
 
@@ -88,15 +149,40 @@ def resolve_svg(row: dict) -> str:
 
 
 PROMPT = (
-    "Reconstruct the diagram as a single canonical SVG. "
-    'Use viewBox="0 0 512 512". Output only SVG markup.'
+    "Reconstruct the diagram as one complete native SVG. "
+    'Use viewBox="{viewbox}" and preserve the diagram\'s aspect ratio, layout, text, '
+    "shapes, and connections. Output only SVG markup. End with </svg>."
 )
+
+
+def canvas_viewbox(row: dict, *, image: Image.Image | None = None) -> str:
+    """Native gold viewBox; image dimensions only when no gold SVG exists."""
+    try:
+        svg = resolve_svg(row)
+    except (FileNotFoundError, KeyError):
+        svg = ""
+    match = re.search(r'\bviewBox\s*=\s*["\']([^"\']+)["\']', svg[:4000], re.IGNORECASE)
+    if match:
+        parts = re.split(r"[\s,]+", match.group(1).strip())
+        if len(parts) == 4:
+            return " ".join(parts)
+    if image is None:
+        image = resolve_image(row)
+    width, height = image.size
+    return f"0 0 {width} {height}"
+
+
+def prompt_for_row(row: dict, template: str = PROMPT, *, image: Image.Image | None = None) -> str:
+    """Fill a canvas-conditioned prompt without changing target coordinates."""
+    viewbox = canvas_viewbox(row, image=image)
+    return template.format(viewbox=viewbox)
 
 
 def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
     """Prompt-completion record for TRL VLM SFT (completion_only_loss masks prompt)."""
     img = resolve_image(row)
     svg = resolve_svg(row)
+    row_prompt = prompt_for_row(row, prompt, image=img)
     # TRL collator injects images from `images`; prompt uses placeholders only.
     return {
         "id": row.get("id"),
@@ -106,7 +192,7 @@ def build_train_example(row: dict, *, prompt: str = PROMPT) -> dict:
                 "role": "user",
                 "content": [
                     {"type": "image"},
-                    {"type": "text", "text": prompt},
+                    {"type": "text", "text": row_prompt},
                 ],
             }
         ],

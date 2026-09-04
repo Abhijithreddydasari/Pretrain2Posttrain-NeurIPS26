@@ -3,11 +3,8 @@
 Primary entrypoints:
 
 ```bash
-# Sanity: gold SVG parse/render/extract on fixtures
-python -m eval.gold_recovery
-
-# Score cached generations vs a gold manifest (when scene graphs exist)
-python -m eval.run_eval --manifest data/processed/vfig_bench/id_manifest.jsonl --preds outputs/generations/base_id.jsonl
+# Score cached generations vs a gold manifest
+python -m eval.run_bench_eval --manifest data/processed/vfig_bench/id_manifest.jsonl --preds outputs/generations/base_id.jsonl
 
 # Plot checkpoint curves after per-checkpoint eval JSON exists
 python -m eval.checkpoint_curves --curves outputs/metrics/curves_example.json
@@ -17,8 +14,8 @@ python -m eval.checkpoint_curves --curves outputs/metrics/curves_example.json
 
 | Bench | Split | Gold SVG? | What it measures | Role in paper |
 |-------|-------|-----------|------------------|---------------|
-| **VFIG-Bench** | 400 ID test | Yes | Validity, render success, pixel sim (SSIM/LPIPS/VisualSim), VFIG component scores (shapes/arrows where applicable), optional VLM-judge (presence/layout/connectivity/details) | **Primary** — hard real scientific figures |
-| **VFIG-Bench-OOD** | 198 OOD | No (image only) | Validity, render success, perceptual sim, VLM-judge / qualitative structure | **OOD generalization probe** — no typed F1 |
+| **VFIG-Bench** | 400 ID test | Yes | Raw/recovered validity, closure and length-limit rates, SSIM and DINO | **Primary** — hard real scientific figures |
+| **VFIG-Bench-OOD** | 198 OOD | No (image only) | Raw/recovered validity, closure and length-limit rates | **OOD syntax probe** |
 | **SVG-Diagrams test** | ~474 | Yes | DINO / perceptual comparability to StarVector line | Secondary |
 | **Controls** | any | — | Correct vs shuffled vs blank image on same prompts | Vision sanity (H3) |
 | **FlowGen** | external | partial | Topology / Strict F1 after triplet extraction | Optional external topology |
@@ -27,9 +24,17 @@ python -m eval.checkpoint_curves --curves outputs/metrics/curves_example.json
 
 Generations are cached once (`outputs/generations/`); metrics can be rescored without re-running the model.
 
-Shared code: `structsvg_lib/` (parse, render, metrics) + `eval/` runners.
+Use the same fixed seeded subset at every checkpoint. The deadline run uses 128 examples from each bench (3,072 generations across eight distinct checkpoints). Report bootstrap CIs. Similarity over all gold examples, with invalid generations scored as zero, is primary; similarity conditional on validity is diagnostic.
 
-## Planned (not wired yet)
+Recovery closes only a deterministic well-formed SVG prefix and discards an incomplete tail. Raw and recovered metrics remain separate.
 
-- `data/scripts/vfig_to_manifest.py` — download VFIG-Bench, render PNGs, emit eval manifests
-- VFIG component + VLM-judge scorers aligned with He et al. 2026
+Shared code: `structsvg_lib/` (legacy name; generic parse/render/metrics only) + `eval/` runners.
+
+## vLLM sweep
+
+```bash
+modal run train/modal_app.py --task sweep --backend vllm --gen-only --max-samples 128 \
+  --benches vfig_id,vfig_ood,svg_diagrams --run-name eval128_ctx8192
+```
+
+The sweep uses an 8192-token model context and batch 64 on A100-80GB, writes a coverage manifest, resumes exact missing IDs, and refuses to score incomplete files. Run the three benches as separate detached Modal jobs when wall time matters; their generation paths must remain distinct.

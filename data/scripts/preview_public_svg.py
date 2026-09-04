@@ -1,7 +1,6 @@
 """Pull a small public-diagram sample and write a browser gallery.
 
-Use this *before* scaling StructSVG. The fixtures in data/fixtures/ are gold-recovery
-stubs, not a visual design target.
+This is an optional visual audit for the public SVG-Diagrams source pool.
 """
 from __future__ import annotations
 

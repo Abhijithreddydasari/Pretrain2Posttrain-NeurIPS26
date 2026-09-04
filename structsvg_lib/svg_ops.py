@@ -341,6 +341,7 @@ def validate_svg(
     svg: str,
     *,
     max_elements: int = 200,
+    max_depth: int = 64,
     min_drawable: int = 2,
     try_render: bool = True,
 ) -> SVGValidation:
@@ -377,6 +378,18 @@ def validate_svg(
     if n > max_elements:
         out.errors.append(f"too many elements: {n}")
 
+    # Reject pathological nesting before calling native rasterizers. Generated
+    # repetitions can otherwise overflow the renderer stack and kill scoring.
+    depth = 0
+    stack = [(root, 1)]
+    while stack:
+        node, node_depth = stack.pop()
+        depth = max(depth, node_depth)
+        if depth > max_depth:
+            out.errors.append(f"nesting too deep: {depth}")
+            break
+        stack.extend((child, node_depth + 1) for child in node)
+
     try:
         norm = normalize_svg(root)
         out.normalized = norm
@@ -385,11 +398,15 @@ def validate_svg(
         out.errors.append(f"normalize failed: {e}")
         return out
 
-    if try_render:
+    # Structural profile violations are already invalid; rendering them is
+    # unnecessary and can be unsafe for adversarial or degenerate SVG trees.
+    if try_render and not out.errors:
         ok_r, rerr = render_png_bytes(out.normalized)
         out.render_ok = ok_r
         if not ok_r:
             out.errors.append(rerr or "render failed")
+    elif try_render:
+        out.render_ok = False
     else:
         out.render_ok = True
 

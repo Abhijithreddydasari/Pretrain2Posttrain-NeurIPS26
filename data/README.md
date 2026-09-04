@@ -4,15 +4,13 @@
 
 ```text
 data/
-  schema/           scene-graph + SVG contracts
-  scripts/          download, filter, StructSVG generators
+  scripts/          download, filter, manifest, and analysis utilities
   raw/              downloaded public data (gitignored)
   processed/        manifests + rendered pairs (gitignored)
     broad/          pilot / scratch (Modal volume mirror)
     svg_diagrams/   full broad 2k coreset (Aug 2026)
     vfig_bench/     VFIG-Bench eval manifests (planned)
-  splits/           locked split IDs (small JSON committed when ready)
-  fixtures/         tiny checked-in examples for tests
+  splits/           fixed split IDs when needed
 ```
 
 ## Public preview (optional)
@@ -128,7 +126,7 @@ Do not commit raw HF dumps, large PNG grids, or model outputs.
 
 ## VFIG data — where it fits (and where it does not)
 
-[VFIG](https://arxiv.org/abs/2603.24575) released **VFIG-Data** (~66k image–SVG pairs on HF `QijiaHe/VFIG-Data`) and **VFIG-Bench** (held-out scientific figures). We do **not** fold VFIG into the locked Broad 2k condition for v0 — that would change provenance and break the matched Broad vs StructSVG comparison mid-pipeline.
+[VFIG](https://arxiv.org/abs/2603.24575) released **VFIG-Data** (~66k image–SVG pairs on HF `QijiaHe/VFIG-Data`) and **VFIG-Bench** (held-out scientific figures). We do **not** fold VFIG into the completed Broad 2k run; it remains evaluation data unless a later experiment is explicitly started.
 
 
 | Use                                     | v0 (Aug 29)                                                                                              | Later                                                                  |

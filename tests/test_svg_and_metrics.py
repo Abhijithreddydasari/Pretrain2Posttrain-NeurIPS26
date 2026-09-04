@@ -1,4 +1,4 @@
-"""pytest for svg validate + gold recovery."""
+"""Tests for SVG validation, rendering, and checkpoint metrics."""
 from __future__ import annotations
 
 import sys
@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from structsvg_lib.metrics import area_between, emergence_times
 from structsvg_lib.svg_ops import preprocess_svg_for_render, render_pil, validate_svg
+from train.vllm_infer import recover_svg_prefix
 
 
 def test_validate_minimal_svg():
@@ -51,3 +52,30 @@ def test_graphviz_text_renders_on_white():
     px = img.load()
     dark = sum(1 for y in range(img.size[1]) for x in range(img.size[0]) if sum(px[x, y]) < 700)
     assert dark > 50, f"expected visible text strokes, got {dark} dark pixels"
+
+
+def test_recover_unterminated_svg_closes_open_elements():
+    raw = '<svg viewBox="0 0 10 10"><g><rect width="4" height="4"/>'
+    recovered, reason = recover_svg_prefix(raw)
+    assert reason == "closed_open_tags"
+    assert recovered == raw + "</g></svg>"
+    assert validate_svg(recovered, try_render=False).parse_ok
+
+
+def test_recover_svg_discards_repeated_incomplete_tail():
+    raw = '<svg viewBox="0 0 10 10"><rect width="4" height="4"/><rect width="'
+    recovered, reason = recover_svg_prefix(raw)
+    assert reason == "closed_open_tags"
+    assert recovered == '<svg viewBox="0 0 10 10"><rect width="4" height="4"/></svg>'
+
+
+def test_recover_svg_does_not_invent_root():
+    assert recover_svg_prefix('<rect width="4"/>') == (None, None)
+
+
+def test_recover_svg_trims_exact_repetition_after_first_copy():
+    tag = '<path d="M 0 0 L 10 10" stroke="black"/>'
+    raw = '<svg viewBox="0 0 10 10">' + tag * 3
+    recovered, reason = recover_svg_prefix(raw)
+    assert reason == "trimmed_exact_repetition_and_closed_open_tags"
+    assert recovered == '<svg viewBox="0 0 10 10">' + tag + "</svg>"

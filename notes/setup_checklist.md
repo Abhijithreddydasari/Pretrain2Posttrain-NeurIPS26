@@ -79,19 +79,17 @@ python -m data.scripts.broad_embed --pilot
 python -m data.scripts.broad_select_coreset --pilot
 python -m data.scripts.broad_visualize --pilot
 
-# StructSVG pilot (Phase B; no HF needed)
-python -m data.scripts.generate_structsvg --pilot
 ```
 
 ## Gates before full train
 
-1. `python -m eval.gold_recovery` → PASS  
+1. `python -m pytest -q` → PASS
 2. `python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml --dry-run`  
 3. Local or Modal overfit 16–32 examples  
 4. Shuffled/blank image control on a handful of preds  
 5. `python -m data.scripts.broad_checks --stage all` (or `--pilot`) → all gates PASS  
 6. Spot-check 20–30 PNGs in `data/processed/svg_diagrams/pngs/` are **960×960** and readable  
-7. Then launch broad E4B SFT; eval on VFIG-Bench after checkpoints land  
+7. Evaluate all saved checkpoints on a fixed seeded subset.
 
 ## Outreach
 
