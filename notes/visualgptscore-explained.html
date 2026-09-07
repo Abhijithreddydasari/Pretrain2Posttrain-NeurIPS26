@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Can it recognize the SVG it cannot write?</title>
+<style>
+body{font:17px/1.65 system-ui,sans-serif;color:#202938;background:#fafaf7;margin:0}main{max-width:780px;margin:auto;padding:36px 22px 70px}h1{font-size:34px;line-height:1.2}h2{font-size:23px;margin-top:36px}p{margin:12px 0}.small{font-size:14px;color:#535f70}.box{background:#fff;border:1px solid #d4d9df;border-radius:12px;padding:20px;margin:20px 0}.formula{font-family:ui-monospace,monospace;overflow-wrap:anywhere;background:#edf1f5;padding:14px;border-radius:6px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}button{font:inherit;padding:9px 16px;border:1px solid #63748a;border-radius:7px;background:white;cursor:pointer}button:focus-visible{outline:3px solid #2563eb}svg{width:100%;height:110px}.moving{transition:transform .65s ease}.score{font-variant-numeric:tabular-nums}.winner{font-weight:700;color:#176343}a{color:#1555a2}code{font-size:.9em}li{margin:7px 0}@media(max-width:520px){.grid{grid-template-columns:1fr}h1{font-size:28px}}@media(prefers-reduced-motion:reduce){.moving{transition:none}}
+</style>
+<main>
+<p class="small">A 4-minute explanation · Proposed experiment, no new results</p>
+<h1>Can it recognize the SVG<br>it cannot write?</h1>
+<p>Writing an entire SVG tests several abilities at once: seeing the image, representing its content in code, maintaining syntax, and finishing the sequence. A broken output does not tell us which ability failed.</p>
+<h2>1. What is VisualGPTScore?</h2>
+<p>Give the model an image and a candidate description. Instead of asking it to generate an answer, ask: <strong>how probable is this exact description given the image?</strong> We propose using SVG code as that description.</p>
+<div class="formula">P(S | I) = ∏ P(sₜ | I, prompt, s₁ … sₜ₋₁)<br>log P(S | I) = Σ log P(sₜ | I, prompt, s₁ … sₜ₋₁)</div>
+<p><em>I</em> is the image; <em>S</em> is the supplied SVG, split into tokens. At every position, we read the probability assigned to the actual next candidate token. We supply the preceding <em>candidate</em> tokens, even if the model would have generated something else. This is <strong>teacher forcing</strong>; no weights are updated.</p>
+<div class="box">
+<strong>Toy calculation: three tokens, not a real SVG</strong>
+<p>Candidate A: probabilities 0.8 × 0.5 × 0.9 = <strong>0.36</strong><br>Candidate B: probabilities 0.8 × 0.2 × 0.9 = <strong>0.144</strong></p>
+<p>Log scores: A = −1.02; B = −1.94. <strong>Higher / less negative wins.</strong> This is model likelihood, not a calibrated probability that A is correct.</p>
+</div>
+<p>The original likelihood idea uses a sum of log probabilities. Longer strings tend to have smaller probabilities. For our SVG probe, we would freeze a length rule in advance: prefer equal-token-length pairs and report mean log probability per SVG token. That normalization is our scoring choice, not a new claim about the original metric. Prompt and image tokens are not scored.</p>
+<h2>2. What does “counterfactual” mean?</h2>
+<p>Change one thing and ask what should change in the answer. Here, move the same circle from left to right. Keep its size, color, canvas, and code structure fixed.</p>
+<div class="box">
+<div class="grid"><div><strong>Candidate A</strong><svg viewBox="0 0 260 100" role="img" aria-label="Circle on the left"><rect x="1" y="1" width="258" height="98" fill="#f1f4f8"/><circle cx="60" cy="50" r="20" fill="#2563eb"/></svg><code>&lt;circle cx="60" cy="50" r="20"/&gt;</code></div><div><strong>Candidate B</strong><svg viewBox="0 0 260 100" role="img" aria-label="Circle on the right"><rect x="1" y="1" width="258" height="98" fill="#f1f4f8"/><circle cx="200" cy="50" r="20" fill="#2563eb"/></svg><code>&lt;circle cx="200" cy="50" r="20"/&gt;</code></div></div>
+<p class="small">Snippets shown; scoring uses complete valid SVGs. These numbers illustrate the edit, not equal tokenizer lengths.</p>
+</div>
+<h2>3. Why must the preference reverse?</h2>
+<p>A model might always prefer A because its code is more familiar. Correctly choosing A once is therefore weak evidence. Show it both images, retaining exactly the same two candidates: an image-sensitive model should prefer A for the left image and B for the right image.</p>
+<div class="box">
+<button id="swap" type="button">Swap the input image</button>
+<svg viewBox="0 0 260 100" role="img" aria-label="Input image: circle on the left" id="input-image"><rect x="1" y="1" width="258" height="98" fill="#f1f4f8"/><circle class="moving" id="dot" cx="60" cy="50" r="20" fill="#2563eb"/></svg>
+<div id="readout" aria-live="polite"><strong>Input: left circle</strong><p class="score">Image-sensitive example: A −0.20 · B −0.80 → <span class="winner">A wins</span><br>Image-ignoring example: A −0.30 · B −0.60 → A wins</p></div>
+<p class="small">Illustrative mean log scores only. Click to see why one correct choice is insufficient.</p>
+</div>
+<p>Our proposed margin adds the two matching preferences:</p>
+<div class="formula">G = [score(A | left) − score(B | left)]<br>　+ [score(B | right) − score(A | right)]</div>
+<p>The image-sensitive example gives 0.60 + 0.60 = <strong>1.20</strong>. The image-ignoring example gives 0.30 − 0.30 = <strong>0</strong>. An image-independent code preference cancels.</p>
+<p>Report the fraction of pairs where <strong>both choices are correct</strong>, plus G and uncertainty across source diagrams. Positive G alone is insufficient: preference can move toward the right answer without actually reversing. Both-correct random guessing is 25% only under independent fair choices; use actual blind controls too.</p>
+<h2>4. What would it tell us across SFT?</h2>
+<ul>
+<li><strong>Grounded discrimination:</strong> can the model distinguish matching from mismatching SVG content when valid candidates are supplied?</li>
+<li><strong>Output execution:</strong> can it generate a complete, renderable SVG on its own? This says nothing by itself about fidelity.</li>
+</ul>
+<p>If the base already discriminates well, but only SFT improves execution, the measured matching ability predates our SFT. If discrimination improves too, SFT changes grounded task performance as well. If both remain poor, we have not demonstrated hidden competence.</p>
+<p><strong>This removes the need to generate syntax; it does not remove the need to understand SVG.</strong> Recognition with a supplied answer is easier than reconstruction. The probe measures specific edited properties, not all visual ability, and cannot identify which pretraining data caused them.</p>
+<h2>5. Is the companion diagnostic worth doing?</h2>
+<p>It scores one gold SVG with its correct image and a shuffled image. If the correct image lowers loss, the image helps predict that target. However, style alone could help; the supplied SVG prefix also reveals content. So it is a useful sanity check, but weak evidence of spatial understanding. <strong>I would make the controlled counterfactual probe the main addition and keep this optional.</strong></p>
+<p class="small">Sources: <a href="https://linzhiqiu.github.io/papers/visual_gpt_score/">VisualGPTScore / language-prior analysis (ICML 2024)</a>; <a href="https://github.com/RAIVNLab/sugar-crepe">SugarCrepe: avoiding shortcuts in negative candidates (NeurIPS 2023)</a>. The SVG counterfactual design and G above are our proposed adaptation; their novelty has not been established by a comprehensive literature search.</p>
+</main>
+<script>
+(()=>{let right=false;const button=document.getElementById('swap'),dot=document.getElementById('dot'),readout=document.getElementById('readout'),input=document.getElementById('input-image');button.addEventListener('click',()=>{right=!right;dot.style.transform=right?'translateX(140px)':'translateX(0px)';input.setAttribute('aria-label','Input image: circle on the '+(right?'right':'left'));readout.innerHTML='<strong>Input: '+(right?'right':'left')+' circle</strong><p class="score">Image-sensitive example: A '+(right?'−0.80':'−0.20')+' · B '+(right?'−0.20':'−0.80')+' → <span class="winner">'+(right?'B':'A')+' wins</span><br>Image-ignoring example: A −0.30 · B −0.60 → A wins</p>';});})();
+</script>
+</html>
