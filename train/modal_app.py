@@ -924,6 +924,58 @@ def vllm_smoke(
     )
 
 
+@app.function(
+    image=vllm_image,
+    gpu="A100-80GB",
+    timeout=6 * 60 * 60,
+    secrets=[hf_secret],
+    volumes=VOLUME_MOUNTS,
+)
+def controls_vllm_remote(
+    *,
+    adapter_root: str = "/vol/out/e4b_broad_v2",
+    bench: str = "vfig_id",
+    pcts: str = "0,20,80,100",
+    modes: str = "shuffled,blank",
+    max_samples: int = 64,
+    sample_seed: int = 42,
+    batch_size: int = 64,
+    max_new_tokens: int = 4096,
+    run_name: str = "controls_vfig_id_64",
+):
+    import subprocess
+    import sys
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "eval.generate_controls",
+        "--adapter-root",
+        adapter_root,
+        "--bench",
+        bench,
+        "--pcts",
+        pcts,
+        "--modes",
+        modes,
+        "--max-samples",
+        str(max_samples),
+        "--sample-seed",
+        str(sample_seed),
+        "--batch-size",
+        str(batch_size),
+        "--max-new-tokens",
+        str(max_new_tokens),
+        "--out-dir",
+        f"/vol/out/generations/{run_name}",
+        "--resume",
+    ]
+    print("[controls]", " ".join(cmd), flush=True)
+    proc = subprocess.run(cmd, text=True)
+    vol_out.commit()
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode, "out": f"/vol/out/generations/{run_name}"}
+
+
 @app.local_entrypoint()
 def main(
     task: str = "smoke",
@@ -981,6 +1033,20 @@ def main(
                 batch_size=batch_size,
             )
         )
+    elif task == "controls":
+        fc = controls_vllm_remote.spawn(
+            adapter_root=adapter_root,
+            bench=benches or "vfig_id",
+            pcts=pcts,
+            max_samples=ms or 64,
+            sample_seed=sample_seed,
+            batch_size=batch_size,
+            max_new_tokens=max_new_tokens or 4096,
+            run_name=run_name,
+        )
+        print("[controls] spawned vLLM controls job — safe to close this terminal")
+        print(f"[controls] function_call_id={fc.object_id}")
+        print("[controls] tail logs: modal app logs structsvg-sft")
     elif task == "sweep":
         sweep_fn = sweep_vllm_remote if backend == "vllm" else sweep_remote
         fc = sweep_fn.spawn(

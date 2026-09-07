@@ -67,7 +67,11 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Large chat exports
+# Paper
+paper/neurips2026_overleaf.zip
+paper/neurips_2026_template.zip
+paper/neurips2026/neurips_2026.tex
+paper/neurips2026/checklist.tex
 neurips_workshop_paper_conversation.md
 cursor_neurips_workshop_paper_submission.md
 
