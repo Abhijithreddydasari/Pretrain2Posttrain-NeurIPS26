@@ -1,6 +1,6 @@
 # Train
 
-LoRA/QLoRA SFT on a frozen VLM **base** checkpoint. Loss: autoregressive CE on **target SVG tokens only** (image + prompt masked).
+LoRA/QLoRA SFT on a frozen VLM **base** checkpoint. Loss: autoregressive Cross Entropy on **target SVG tokens only** (image + prompt masked).
 
 ## Pipeline overview (v0)
 
@@ -22,6 +22,8 @@ Phase D — optional follow-up (post broad curves)
   (b) fresh base + SFT on VFIG-Data 2k only
   Re-eval on VFIG-Bench (must exclude train IDs from the 400 test set)
 ```
+
+
 
 ## Commands
 
@@ -53,18 +55,20 @@ modal run data/scripts/modal_broad_app.py --stage all --pilot
 Configs: `configs/train_e2b_qlora_smoke.yaml`, `configs/train_e4b_broad.yaml`.
 
 Modal secret: `huggingface-secret` with `HF_TOKEN`. Volumes: HF cache, `structsvg-outputs`.  
-Training entrypoint: **`train/modal_app.py`** (not `data/scripts/modal_broad_app.py`, which is the data pipeline).
+Training entrypoint: `train/modal_app.py` (not `data/scripts/modal_broad_app.py`, which is the data pipeline).
 
 **GPU:** **A100-80GB** for train/probe. Smoke stays on L4 (cheap load test).  
 **Batch:** 4×2 + grad_ckpt (effective 8). Stress probe: ~25.5 GB, ~21 s/step, ~4.3 h / ~$11 on A100-80GB.
 
 **Metrics saved during train** (under `outputs/e4b_broad/` → Modal `/vol/out/e4b_broad/`):
+
 - `train_log.jsonl` — streaming loss/grad_norm/lr every 10 steps
 - `train_log.json` — full `log_history` at end
 - `trainer_state.json` — HF trainer state (for resume/debug)
 - `checkpoint_manifest.json` — pct→step→adapter path map
 
 **Paper checkpoint curves** (validity, SSIM, DINO vs SFT %) come from **eval after train**, not training loss:
+
 ```bash
 modal run train/modal_app.py --task sweep --protocol prompt
 # → outputs/metrics/sweep/curves_prompt.json
@@ -75,10 +79,12 @@ python -m eval.checkpoint_curves --curves outputs/metrics/sweep/curves_prompt.js
 
 ## Training conditions (v0)
 
-| Run | Config | Manifest | N |
-|-----|--------|----------|---|
-| Base (0%) | — | — | no training; eval only |
-| Broad SFT | `train_e4b_broad.yaml` | `data/processed/svg_diagrams/train_manifest.jsonl` | 2k |
+
+| Run       | Config                 | Manifest                                           | N                      |
+| --------- | ---------------------- | -------------------------------------------------- | ---------------------- |
+| Base (0%) | —                      | —                                                  | no training; eval only |
+| Broad SFT | `train_e4b_broad.yaml` | `data/processed/svg_diagrams/train_manifest.jsonl` | 2k                     |
+
 
 **Broad 2k on disk (gitignored locally):**
 
@@ -91,7 +97,7 @@ data/processed/svg_diagrams/
 
 On Modal the same tree is baked into the train image at `/root/data/processed/svg_diagrams/` (also reachable via `structsvg-data` volume as fallback). Training loads all PNG+SVG into **host RAM once** before the model (~5–6 GiB decoded); no per-epoch disk reads.
 
-Model: **`google/gemma-4-E4B`** — the **base** (pretrained) checkpoint, **not** `google/gemma-4-E4B-it`.
+Model: `google/gemma-4-E4B` — the **base** (pretrained) checkpoint, **not** `google/gemma-4-E4B-it`.
 
 **Not in v0:** RL/GRPO, training on VFIG-Data before broad curves exist, full SVG-Stack.
 
@@ -102,12 +108,16 @@ The workshop asks what **post-training** changes relative to **pretraining**. Th
 - **Checkpoint 0%** = pretrained base on the same task + metrics (with and without SVG-prefix scaffold).
 - **Checkpoints 5–100%** = what one SFT stage adds, and **when** (validity vs structure scores on VFIG-Bench).
 
-| Tier | Models | Purpose |
-|------|--------|---------|
-| **v0 must** | `google/gemma-4-E4B` **base** | Dense checkpoint curves; broad SFT; VFIG-Bench eval |
-| **v1 ablation** | Same base, optional 2nd SFT on VFIG-Data 2k | Does structure-designed data move structure metrics? |
-| **v1 replication** | One other open **base** VLM | Replication of syntax-before-structure timing |
-| **Out of scope** | VFIG instruct checkpoints | Already post-aligned |
+
+| Tier               | Models                                      | Purpose                                              |
+| ------------------ | ------------------------------------------- | ---------------------------------------------------- |
+| **v0 must**        | `google/gemma-4-E4B` **base**               | Dense checkpoint curves; broad SFT; VFIG-Bench eval  |
+| **v1 ablation**    | Same base, optional 2nd SFT on VFIG-Data 2k | Does structure-designed data move structure metrics? |
+| **v1 replication** | One other open **base** VLM                 | Replication of syntax-before-structure timing        |
+| **Out of scope**   | VFIG instruct checkpoints                   | Already post-aligned                                 |
+
+
+
 
 ## Relation to VFIG
 
@@ -122,3 +132,4 @@ Do not train on VFIG-Data until broad checkpoint curves are saved and evaluated.
 - Broad dry-run cannot load 2000 rows
 - Shuffled-image scores ≈ correct-image (model ignoring vision)
 - Assistant-only loss mask wrong on first E4B forward pass (Modal `--verify-loss-mask`)
+
