@@ -1,203 +1,107 @@
-# Pretrain2Posttrain Workshop, NeurIPS 2026
+# What Changes During SVG Fine-Tuning?
 
-Does SFT on a multimodal base VLM teach **valid SVG first**, and **diagram structure** (entities, connections, layout) only later?
+### Separating Visual Discrimination from Executable Generation
 
-This repo is the code and data for a short paper aimed at the NeurIPS 2026 workshop [*Transitioning from Pre-Training to Post-Training*](https://pretrain2posttrain.github.io/call.html).
+Research code for our submission to the **NeurIPS 2026 workshop, Transitioning from Pre-Training to Post-Training**.
 
-The setup is deliberately small. **Gemma 4 E4B base**, LoRA SFT on a **2k broad-diagram coreset** from [starvector/svg-diagrams](https://huggingface.co/datasets/starvector/svg-diagrams), then eval on **VFIG-Bench** (primary) plus secondary benches.
+[Manuscript source](paper/neurips2026/main.tex) · [Paper and figures](paper/README.md) · [Data](data/README.md) · [Training](train/README.md) · [Evaluation](eval/README.md)
 
-We save dense checkpoints (0, 5, 10, 20, 40, 60, 80, 100%) to see *when* syntax and structure move. **We do not train on VFIG-Data in v0** — VFIG is held-out eval. A optional **second SFT stage** (VFIG-Data 2k or sequential on the same adapter) is a follow-up ablation after broad curves exist.
+**What does supervised fine-tuning change when a model reconstructs diagrams as SVG?** We follow pretrained Gemma 4 E4B through one broad-data LoRA run and separate two behaviors: generating executable SVG and discriminating between supplied, valid SVG candidates.
 
-**Working claim:** post-training mostly buys SVG syntax/format; compositional structure lags on hard held-out figures unless data and eval pressure it.
+**Main finding:** SFT improves executable generation on held-out examples from the training source, with no reliable final validity gain on external scientific figures. Candidate matching changes little. The checkpoint curves **do not support a simple syntax-first account**.
 
----
+## Results
 
-## What is done
+Free generation uses the same **128 examples per benchmark** at the base and seven SFT checkpoints: **3,072 generations** in total. These are subset results, not full-benchmark scores.
 
-| Piece | Status |
-|-------|--------|
-| Broad 2k data pipeline | Done (182k scanned → 2k train) |
-| Eval harness + gold recovery | Done (fixtures); VFIG-Bench adapter next |
-| Gemma E4B broad SFT + checkpoint curves | **Next** |
-| VFIG-Bench eval on checkpoints | After SFT |
+- **SVG-Diagrams, held-out source data:** executable validity increases from **3.1% to 35.9%**. The paired gain is **32.8 percentage points**, with a 95% bootstrap interval of **[24.2, 41.4]**. DINO similarity increases from **0.014 to 0.298**.
+- **External scientific figures:** final validity changes from **5.5% to 7.8%** on VFIG-ID and **4.7% to 5.5%** on VFIG-OOD. Both paired gain intervals include zero. “ID” is VFIG's split name; both VFIG subsets are external to our training source.
+- **Learning timing:** source-distribution validity, DINO, and SSIM reach half of their observed base-to-final gain at the **20% checkpoint**. Validity does not lead fidelity at this checkpoint resolution.
+- **Supporting counterfactual diagnostic:** strict image–SVG matching changes from **19/65 to 20/65** pairs. At the final checkpoint, **14 of the 20** successfully matched sources still produce invalid SVG in free generation.
 
----
+![Free-generation checkpoint curves with 95% example-level intervals](assets/svg_probe_generation_curves.png)
 
-## Pipeline
+*Free generation across the base and seven SFT checkpoints. Invalid outputs receive zero DINO and SSIM, so these fidelity scores partly depend on executable validity. [Vector figure](paper/neurips2026/figures/svg_probe_generation_curves.pdf).*
 
-End-to-end flow: broad 2k SFT, dense checkpoints, primary eval on VFIG-Bench.
+## Experiment
+
+The task is **diagram image → native SVG**. The model receives the image and a fixed reconstruction prompt; its completion contains SVG markup.
+
+- **Model:** `google/gemma-4-E4B`, pretrained base checkpoint.
+- **Training data:** 2,000 curated SVG-Diagrams pairs; five fail the complete-sequence length gate, leaving **1,995 SFT pairs**. No VFIG data is used for training.
+- **SFT:** frozen bf16 base with bf16 LoRA adapters; rank 16, alpha 32, dropout 0.05, all linear modules. Target-SVG-only cross-entropy, two epochs, learning rate `1e-4`, effective batch size 8, 8,192-token context, 500 optimizer steps.
+- **Trajectory:** unchanged base/0%, then adapters at 5, 10, 20, 40, 60, 80, and 100%. The `final` adapter duplicates 100%.
+- **Generation:** greedy decoding, 4,096 output tokens, fixed seed-42 subsets of SVG-Diagrams, VFIG-ID, and VFIG-OOD.
+- **Candidate diagnostic:** 65 visually inspected original/edited pairs, evaluated at base, 20%, and final. Equal-token SVG candidates test text, box-position, connector-endpoint, and combined edits; white and unrelated images serve as controls.
+
+The submitted run uses [train_e4b_broad_v2.yaml](configs/train_e4b_broad_v2.yaml). The earlier broad config and E2B QLoRA smoke config are retained for development history.
 
 ```mermaid
-flowchart TB
-  subgraph Data
-    HF["HF stream<br/>starvector/svg-diagrams<br/>182k rows"]
-    VFIGF["Validate + VFIG filter<br/>Clean ≥ 0.40, C ≤ 50"]
-    POOL["Pool ~30k<br/>SigLIP + k-means"]
-    BROAD["Broad train 2k"]
-  end
-
-  BASE["Gemma 4 E4B base<br/>checkpoint 0%"]
-
-  subgraph Train["LoRA SFT"]
-    CKPT["Checkpoints<br/>0, 5, 10, 20, 40, 60, 80, 100%"]
-  end
-
-  subgraph Eval["Primary eval (VFIG-Bench)"]
-    VAL["Validity + render"]
-    PIX["Pixel / perceptual sim"]
-    COMP["Component scores"]
-    OOD["VFIG-Bench-OOD<br/>198 image-only"]
-  end
-
-  HF --> VFIGF --> POOL --> BROAD
-  BASE --> CKPT
-  BROAD --> CKPT
-  CKPT --> VAL
-  CKPT --> PIX
-  CKPT --> COMP
-  CKPT --> OOD
+flowchart LR
+  A["SVG-Diagrams train pool<br/>182,144 examples"] --> B["Filter and deduplicate<br/>30,011 candidates"]
+  B --> C["Diverse coreset<br/>2,000 selected · 1,995 fit"]
+  C --> D["Gemma 4 E4B base<br/>Two-epoch bf16 LoRA SFT"]
+  D --> E["Base + seven checkpoints<br/>Free generation on 3 × 128 examples"]
+  D --> F["Base, 20%, final<br/>65-pair candidate diagnostic"]
 ```
 
-Broad curation detail (Modal stages, dedup, quotas): [data/README.md](data/README.md).
+## Interpretation and limitations
 
----
+This is **one model, one SFT run, and one training source**. It measures a distribution-dependent change in executable behavior; it does not establish that SFT creates general diagram understanding or identify the contents of pretraining.
 
-## Broad 2k coreset
+Invalid outputs receive zero end-to-end fidelity, coupling validity and similarity. The candidate probe supplies valid alternatives and measures discrimination under teacher forcing, not free reconstruction. Its small, constructibility-filtered edit groups do not establish a general ranking of visual skills.
 
-Training pairs for the heterogeneous condition. Built from the [starvector/svg-diagrams](https://huggingface.co/datasets/starvector/svg-diagrams) train split at revision `aacd39c8…` (seed 42). Scripts: [data/scripts/](data/scripts/).
+Training and inference used different stopping-token conventions. Final output-limit rates are 62.5% on SVG-Diagrams, 92.2% on VFIG-ID, and 94.5% on VFIG-OOD; these failures may partly reflect that protocol mismatch. A controlled stopping-token ablation is needed before attributing them entirely to model capability.
 
-| Stage | Count |
-|-------|------:|
-| HF train rows scanned | 182,144 |
-| Pass A (validate + VFIG) | 44,807 |
-| Pool after phash dedup | 30,011 |
-| **Train coreset** | **2,000** |
+## Getting started
 
-About 1.1% of scanned rows survive to the final set. Most drops happen at the VFIG cleanliness filter (path-heavy SVGs) and canonical validation; two rows were removed for overlap with the held-out test hashes.
-
-The coreset has **687** workflow_like, **1,296** labeled, and **17** geometry_like examples. Selection upsampled workflow_like diagrams slightly relative to the pool while keeping cluster coverage via SigLIP + structural-feature medoids.
-
-<table border="0" cellspacing="20" cellpadding="0" align="center">
-  <tr>
-    <td align="center" valign="top" width="50%">
-      <img src="assets/broad_funnel.png" alt="182k to 2k funnel" width="440"/>
-      <br/>
-      <em>Funnel: HF train stream → filtered pool → 2k coreset.</em>
-    </td>
-    <td align="center" valign="top" width="50%">
-      <img src="assets/broad_rejections.png" alt="Rejection breakdown" width="440"/>
-      <br/>
-      <em>Where rows drop out before selection.</em>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="top" width="50%">
-      <img src="assets/broad_bucket_proportions.png" alt="Bucket proportions in pool vs coreset" width="440"/>
-      <br/>
-      <em>Pool vs selected bucket mix.</em>
-    </td>
-    <td align="center" valign="top" width="50%">
-      <img src="assets/broad_coreset_coverage.png" alt="PCA coverage of pool vs coreset" width="440"/>
-      <br/>
-      <em>SigLIP + structural features: pool (gray) vs selected (color).</em>
-    </td>
-  </tr>
-</table>
-
-<p align="center">
-  <img src="assets/broad_thumbnail_grid.png" alt="Sample thumbnails from coreset" width="640"/>
-  <br/>
-  <em>Random samples from the 2k train set (960×960 letterboxed PNGs).</em>
-</p>
-
-Processed outputs are written to `data/processed/svg_diagrams/` (gitignored). See [data/README.md](data/README.md) for Modal commands and how to regenerate these plots.
-
----
-
-## Evaluation
-
-Code: [structsvg_lib/](structsvg_lib/) (shared parse/render/metrics utilities; legacy package name) and [eval/](eval/). See [eval/README.md](eval/README.md) for the full bench list.
-
-| Bench | What it measures |
-|-------|------------------|
-| **VFIG-Bench (400)** | Validity, render, pixel/perceptual sim, VFIG component + VLM-judge structure scores |
-| **VFIG-Bench-OOD (198)** | Generalization on unseen figures (no gold SVG; judge + validity) |
-| **SVG-Diagrams test (~474)** | DINO / perceptual comparability (secondary) |
-| **Controls** | Correct vs shuffled vs blank image |
-
-Generations are cached once; metrics can be rescored without re-running the model.
-
-Raw SVG validity and conservative prefix-recovery validity are reported separately; repaired output never replaces the model's raw prediction.
-
----
-
-## Training
-
-Local smoke: E2B QLoRA on 8GB ([configs/train_e2b_qlora_smoke.yaml](configs/train_e2b_qlora_smoke.yaml)). Full runs: E4B LoRA on Modal ([train/modal_app.py](train/modal_app.py), [configs/train_e4b_broad.yaml](configs/train_e4b_broad.yaml)).
-
-The completed v2 run is two-epoch, 8192-token bf16 LoRA SFT. Loss is CE on **target SVG tokens only** (image + prompt masked). The eight distinct evaluation points are base/0%, 5%, 10%, 20%, 40%, 60%, 80%, and 100%; `final` duplicates 100% and is not a ninth scientific checkpoint.
-
----
-
-## Repo layout
-
-```text
-notes/          research statement, experiment card, canonical SVG spec
-configs/        train / eval YAML
-data/           broad scripts and VFIG/SVG-Diagrams eval adapters
-train/          LoRA SFT + Modal entrypoints (`train/modal_app.py`)
-eval/           runners, checkpoint curves
-structsvg_lib/  shared SVG parse/render/metrics (legacy library name only)
-paper/          draft
-assets/         README figures (from broad analysis)
-```
-
-More detail: [notes/research_statement.md](notes/research_statement.md), [notes/experiment_card.md](notes/experiment_card.md), [notes/canonical_svg.md](notes/canonical_svg.md).
-
----
-
-## Setup
+Python **3.10+** is declared in the package; Modal images use **Python 3.11**. Run commands from the repository root.
 
 ```bash
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+# Linux/macOS: source .venv/bin/activate
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m pytest -q
 ```
 
-You need Gemma 4 **base** accepted on Hugging Face, `HF_TOKEN` set, and Modal secret `huggingface-secret` for cloud runs.
+The requirements include the GPU training stack. Gemma access requires accepting its Hugging Face access terms and configuring `HF_TOKEN`; Modal jobs additionally use the `huggingface-secret` secret. See [training setup](train/README.md) for data-volume preparation and explicit v2 commands.
 
-### Quick commands
+After preparing the broad data locally:
 
 ```bash
-# Broad analysis plots (if processed data is local)
-python -m data.scripts.broad_analyze --out data/processed/svg_diagrams
-
-# Broad train dry-run
-python -m train.lora_sft --config configs/train_e4b_broad.yaml --dry-run
-
-# Modal E4B smoke + train
-modal run train/modal_app.py --task smoke
-modal run train/modal_app.py --task train --config train_e4b_broad.yaml
-
-# Fresh, resumable vLLM checkpoint sweep (128 fixed examples per bench)
-modal run train/modal_app.py --task vllm_smoke --run-name smoke_ctx8192
-modal run train/modal_app.py --task sweep --backend vllm --gen-only --max-samples 128 \
-  --benches vfig_id,vfig_ood,svg_diagrams --run-name eval128_ctx8192
+python -m train.lora_sft --config configs/train_e4b_broad_v2.yaml --dry-run
 ```
 
----
+This checks manifest loading and previews the first eight pairs. The exact processor-based sequence-length gate runs during training setup; the dry-run alone does not certify all 1,995 complete sequences.
 
-## Related work
+## Reproducibility and artifact availability
 
-- **StarVector / SVG-Diagrams** - broad data source; we study post-training timing, not leaderboard scores.
-- **VFIG** (He et al., 2026) - code filter for broad pool; structure-aware eval inspiration.
-- **FlowGen** - external topology benchmark (planned).
-- **LIMA / Chu** - claim style and ID/OOD framing.
+**Included in Git:** curation, training, inference and evaluation code; YAML configurations; unit tests; manuscript LaTeX and bibliography; paper PDF figures; README preview images.
 
----
+**Excluded from Git:** processed datasets, selected/evaluation manifests, adapters, tokenizers, cached generations, raw probe scores, and analysis outputs under `outputs/`. A fresh clone supports code inspection and tests, but does not contain the evidence bundle needed to reproduce the reported numbers directly. No public checkpoint or evidence-download URL is recorded here yet.
 
-## Citation
+The [evaluation README](eval/README.md#reproducing-the-submitted-analysis) identifies expected evidence paths and remaining dependencies. Dependencies use version ranges and the model config uses `revision: main`; these are not an immutable environment lock. Exact replay requires the original model revision, environment versions, frozen subsets, and run artifacts.
 
-Paper draft: [paper/draft.md](paper/draft.md). Citation block will go here after submission.
+## Repository guide
 
-If you use the broad curation scripts, please cite this repo once the workshop paper is public.
+- [data/](data/) — source adapters, curation, deduplication, manifests, and coreset analysis.
+- [train/](train/) — target-only multimodal SFT, checkpoint inference, vLLM, and Modal entrypoints.
+- [eval/](eval/) — cached-generation scoring, checkpoint analysis, counterfactual construction and likelihood scoring.
+- [structsvg_lib/](structsvg_lib/) — shared SVG parsing, rendering, and metrics. The package name is historical; the submitted experiment does not use a synthetic StructSVG dataset.
+- [configs/](configs/) — model, data, and training settings.
+- [tests/](tests/) — SVG, metric, curation-feature, and probe tests.
+- [paper/](paper/) — current manuscript source and earlier draft history.
+- [notes/](notes/) — planning and decisions; some notes describe superseded experiments. Use the manuscript and v2 config for the reported study.
+
+## Data sources and attribution
+
+The broad coreset comes from [StarVector's SVG-Diagrams dataset](https://huggingface.co/datasets/starvector/svg-diagrams). VFIG supplies the scientific-figure evaluations and informs the geometry-cleanliness filter. Full scholarly references are in the [manuscript bibliography](paper/neurips2026/references.bib). Curation counts, provenance, sample images, and regeneration commands are documented in [data/README.md](data/README.md).
+
+## Paper, citation, and licensing
+
+**Submission:** *What Changes During SVG Fine-Tuning? Separating Visual Discrimination from Executable Generation*, submitted to the NeurIPS 2026 workshop *Transitioning from Pre-Training to Post-Training*. This records submission, not acceptance.
+
+The checked-in manuscript retains anonymous author metadata. A public paper link and author-complete citation will be added when available; see [paper/README.md](paper/README.md) for the current source.
+
+No repository-level license file is currently included. Source datasets and Gemma retain their respective licenses and access conditions; this repository does not relicense them.
