@@ -1,135 +1,72 @@
-# Train
+# Training
 
-LoRA/QLoRA SFT on a frozen VLM **base** checkpoint. Loss: autoregressive Cross Entropy on **target SVG tokens only** (image + prompt masked).
+The submitted experiment is the completed **Broad v2** run: pretrained `google/gemma-4-E4B` with bf16 LoRA on 1,995 image–SVG pairs. Use [train_e4b_broad_v2.yaml](../configs/train_e4b_broad_v2.yaml); the CLI still defaults to the earlier broad config, so pass v2 explicitly.
 
-## Pipeline overview (v0)
+## Reported configuration
 
-```text
-Phase A — data (done)
-  broad 2k manifest  →  data/processed/svg_diagrams/
+- Frozen bf16 base and bf16 adapters; no 4-bit quantization in the main run.
+- LoRA rank 16, alpha 32, dropout 0.05, all linear modules.
+- Cross-entropy on target SVG tokens only; image and prompt tokens are masked.
+- Two epochs, 500 optimizer steps, learning rate `1e-4`, `adamw_torch`.
+- Per-device batch 2 × gradient accumulation 4 = effective batch 8; gradient checkpointing enabled.
+- 960 × 960 letterboxed images and an 8,192-token complete-sequence limit.
+- 2,000 selected pairs → five overlength examples discarded → **1,995 retained**. Complete targets are filtered rather than truncated.
+- Base/0% plus adapters at steps **25, 50, 100, 200, 300, 400, 500**, corresponding to **5, 10, 20, 40, 60, 80, 100%**. `final` duplicates 100%.
 
-Phase B — Gemma E4B (locked v0)
-  base infer @ 0%  →  SFT broad 2k
-  save adapters @ 0,5,10,20,40,60,80,100%
+The submitted run uses one broad SFT condition. Synthetic StructSVG, VFIG training, curriculum, RL, and additional model families are outside its results. E2B QLoRA is a separate local smoke configuration.
 
-Phase C — eval (see eval/README.md)
-  VFIG-Bench 400 (primary, gold SVG)
-  VFIG-Bench-OOD 198 (image-only generalization)
-  SVG-Diagrams test, controls (secondary)
+## Setup
 
-Phase D — optional follow-up (post broad curves)
-  (a) sequential SFT: continue adapter on VFIG-Data 2k coreset, or
-  (b) fresh base + SFT on VFIG-Data 2k only
-  Re-eval on VFIG-Bench (must exclude train IDs from the 400 test set)
-```
+Install the [root requirements](../requirements.txt), configure Modal authentication, and accept the Gemma model's Hugging Face access terms. Set `HF_TOKEN` locally when loading the model and provide it through the Modal secret **`huggingface-secret`** for remote jobs.
 
+Modal uses these volumes:
 
+- `structsvg-hf-cache` at `/vol/hf` — model cache.
+- `structsvg-data` at `/vol/data` — prepared training pairs.
+- `structsvg-outputs` at `/vol/out` — adapters, logs, generations, and metrics.
 
-## Commands
+Train/probe jobs use **A100-80GB**; the bf16 load-only smoke uses **L4**. See [modal_app.py](modal_app.py) for the image definitions. Dependencies are version ranges, so rebuilding the image is not an exact recreation of the original environment.
 
-```bash
-# Data preview / dry-run (no GPU)
-python -m train.lora_sft --config configs/train_e4b_broad.yaml --dry-run
+## Prepare and validate
 
-# Local 8GB smoke (E2B QLoRA) — if processor loads on your transformers build
-python -m train.lora_sft --config configs/train_e2b_qlora_smoke.yaml
-
-# Base inference dry-run
-python -m train.base_infer --manifest data/processed/svg_diagrams/train_manifest.jsonl --dry-run
-
-# E4B broad SFT (Modal — A100-80GB, batch=3×accum=3)
-modal run train/modal_app.py --task smoke      # load-only VRAM check (L4)
-modal run train/modal_app.py --task train_dry  # 2000 rows, no GPU train
-modal run train/modal_app.py --task verify_mask
-modal run train/modal_app.py --task probe      # batch ladder 4→3→2 on A100-80GB
-modal run train/modal_app.py --task train      # full SFT → /vol/out/e4b_broad/
-
-# After train — eval on Modal (sequential, not parallel with train)
-modal run train/modal_app.py --task infer --manifest data/processed/vfig_bench/id_manifest.jsonl --out /vol/out/generations/base_0pct_vfig_prompt.jsonl --protocol prompt
-modal run train/modal_app.py --task sweep --protocol prompt   # all checkpoints × 3 benches
-
-# Modal broad data pipeline (separate app; already done)
-modal run data/scripts/modal_broad_app.py --stage all --pilot
-```
-
-Configs: `configs/train_e2b_qlora_smoke.yaml`, `configs/train_e4b_broad.yaml`.
-
-Modal secret: `huggingface-secret` with `HF_TOKEN`. Volumes: HF cache, `structsvg-outputs`.  
-Training entrypoint: `train/modal_app.py` (not `data/scripts/modal_broad_app.py`, which is the data pipeline).
-
-**GPU:** **A100-80GB** for train/probe. Smoke stays on L4 (cheap load test).  
-**Batch:** 4×2 + grad_ckpt (effective 8). Stress probe: ~25.5 GB, ~21 s/step, ~4.3 h / ~$11 on A100-80GB.
-
-**Metrics saved during train** (under `outputs/e4b_broad/` → Modal `/vol/out/e4b_broad/`):
-
-- `train_log.jsonl` — streaming loss/grad_norm/lr every 10 steps
-- `train_log.json` — full `log_history` at end
-- `trainer_state.json` — HF trainer state (for resume/debug)
-- `checkpoint_manifest.json` — pct→step→adapter path map
-
-**Paper checkpoint curves** (validity, SSIM, DINO vs SFT %) come from **eval after train**, not training loss:
+First follow the [data instructions](../data/README.md) to populate `data/processed/svg_diagrams/` with the manifest, PNGs, and SVGs.
 
 ```bash
-modal run train/modal_app.py --task sweep --protocol prompt
-# → outputs/metrics/sweep/curves_prompt.json
-python -m eval.checkpoint_curves --curves outputs/metrics/sweep/curves_prompt.json
+python -m pytest -q
+python -m train.lora_sft --config configs/train_e4b_broad_v2.yaml --dry-run
+python -m data.scripts.upload_broad_modal
+modal run train/modal_app.py --task upload_status
+modal run train/modal_app.py --task smoke
+modal run train/modal_app.py --task train_dry --config train_e4b_broad_v2.yaml
+modal run train/modal_app.py --task verify_mask --config train_e4b_broad_v2.yaml
 ```
 
-**Eval timing:** Training and eval are **separate**. `--task train` only writes LoRA adapters. Run `--task infer` per checkpoint/bench, or `--task sweep` after train to generate + score all checkpoints on VFIG ID/OOD + SVG-Diagrams test sequentially.
+The upload helper writes the local broad directory to the data volume. The remote loader resolves supported volume layouts. Check upload status before training.
 
-## Training conditions (v0)
+The dry-run loads the manifest and previews only the first eight pairs; it does not run the full processor/token gate. The loss-mask check loads the model and verifies supervision on a batch. Neither replaces inspection of the completed run's token-budget report.
 
+## Run SFT
 
-| Run       | Config                 | Manifest                                           | N                      |
-| --------- | ---------------------- | -------------------------------------------------- | ---------------------- |
-| Base (0%) | —                      | —                                                  | no training; eval only |
-| Broad SFT | `train_e4b_broad.yaml` | `data/processed/svg_diagrams/train_manifest.jsonl` | 2k                     |
+These commands launch cloud GPU work. Choose a new `train.output_dir` in a copied config when running a new experiment, so the completed run remains identifiable.
 
-
-**Broad 2k on disk (gitignored locally):**
-
-```text
-data/processed/svg_diagrams/
-  train_manifest.jsonl   # 2000 rows
-  pngs/                  # 2000 × 960×960 PNG (~63 MiB)
-  svgs/                  # 2000 canonical SVGs (~12 MiB)
+```bash
+modal run train/modal_app.py --task probe --config train_e4b_broad_v2.yaml
+modal run train/modal_app.py --task train --config train_e4b_broad_v2.yaml
 ```
 
-On Modal the same tree is baked into the train image at `/root/data/processed/svg_diagrams/` (also reachable via `structsvg-data` volume as fallback). Training loads all PNG+SVG into **host RAM once** before the model (~5–6 GiB decoded); no per-epoch disk reads.
+With the checked-in v2 configuration, adapters and metadata are written under `/vol/out/e4b_broad_v2/`. Training and checkpoint evaluation are separate entrypoints; launching training does not produce the paper's evaluation curves.
 
-Model: `google/gemma-4-E4B` — the **base** (pretrained) checkpoint, **not** `google/gemma-4-E4B-it`.
+Retain `checkpoint_manifest.json`, `token_budget_report.json`, `train_log.jsonl`, `train_log.json`, `trainer_state.json`, the saved tokenizer/processor, and every scheduled adapter. The checkpoint manifest maps training percentages to actual optimizer steps and adapter paths.
 
-**Not in v0:** RL/GRPO, training on VFIG-Data before broad curves exist, full SVG-Stack.
+## Evaluate the trajectory
 
-## Pre→Post: one model vs several
+Prepare the benchmark manifests before launching inference; see [evaluation](../eval/README.md). The submitted protocol uses base plus seven checkpoints, seed 42, 128 examples per benchmark, an 8,192-token context, and a 4,096-token output budget.
 
-The workshop asks what **post-training** changes relative to **pretraining**. That is answered primarily **within one architecture**:
+```bash
+modal run train/modal_app.py --task vllm_smoke --adapter-root /vol/out/e4b_broad_v2 --run-name reproduction_smoke
+modal run train/modal_app.py --task sweep --backend vllm --gen-only --adapter-root /vol/out/e4b_broad_v2 --max-samples 128 --sample-seed 42 --max-new-tokens 4096 --benches vfig_id,vfig_ood,svg_diagrams --run-name reproduction_eval128
+```
 
-- **Checkpoint 0%** = pretrained base on the same task + metrics (with and without SVG-prefix scaffold).
-- **Checkpoints 5–100%** = what one SFT stage adds, and **when** (validity vs structure scores on VFIG-Bench).
+The smoke uses a short output cap to validate loading and generation; its predictions are not paper results. Retain the sweep's subset and coverage manifests. The 0% evaluation uses the unchanged base; `checkpoint_pct_000` is separately saved with initialized LoRA.
 
-
-| Tier               | Models                                      | Purpose                                              |
-| ------------------ | ------------------------------------------- | ---------------------------------------------------- |
-| **v0 must**        | `google/gemma-4-E4B` **base**               | Dense checkpoint curves; broad SFT; VFIG-Bench eval  |
-| **v1 ablation**    | Same base, optional 2nd SFT on VFIG-Data 2k | Does structure-designed data move structure metrics? |
-| **v1 replication** | One other open **base** VLM                 | Replication of syntax-before-structure timing        |
-| **Out of scope**   | VFIG instruct checkpoints                   | Already post-aligned                                 |
-
-
-
-
-## Relation to VFIG
-
-- **VFIG** optimizes end-state figure→SVG quality (66k data, curriculum SFT+RL).
-- **We** measure emergence during **plain SFT from base** on broad 2k, then score on **held-out VFIG-Bench**.
-
-Do not train on VFIG-Data until broad checkpoint curves are saved and evaluated.
-
-## Gates (stop if)
-
-- `python -m pytest -q` fails
-- Broad dry-run cannot load 2000 rows
-- Shuffled-image scores ≈ correct-image (model ignoring vision)
-- Assistant-only loss mask wrong on first E4B forward pass (Modal `--verify-loss-mask`)
-
+**Known protocol limitation:** training used the chat-template turn terminator, while generation used the tokenizer's declared end-of-sequence token. Preserve that distinction when reproducing the submitted results; a stopping-token change is a new ablation. [eos_protocol_audit.py](../eval/eos_protocol_audit.py) contains the audit.
